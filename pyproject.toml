@@ -1,0 +1,23 @@
+[project]
+name = "drivebot-mcp"
+version = "0.1.0"
+description = "DriveBot MCP server for DriveCarClub (pilot: SOP 5 and SOP 6)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi==0.143.0",
+    "uvicorn==0.54.0",
+    "requests==2.34.2",
+    "python-dotenv==1.2.4",
+    "tzdata==2026.5",
+]
+
+[tool.uv]
+# This is an app we run, not a library we publish, so uv doesn't need to build it.
+package = false
+
+[dependency-groups]
+# Only needed to run the tests (FastAPI's TestClient uses httpx2).
+dev = [
+    "httpx2==2.13.1",
+]
