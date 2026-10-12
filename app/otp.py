@@ -3,8 +3,11 @@
 On website chat anyone can type any number, so before DriveBot shares
 booking details the customer proves the number is theirs:
   1. send_code():  we text a 6-digit code to the number they typed.
-  2. check_code(): they tell DriveBot the code. If it matches, the number
-                   is saved as the session's "verified_mobile".
+  2. check_code(): they tell DriveBot the code. If it matches, it returns
+                   the number the code was sent to, and the caller saves it.
+
+The same functions work for a chat conversation (send_otp / verify_otp
+tools) and for a website login (website.py): "session" is just a dict.
 
 What is kept in the session (never the code itself):
   session["otp"]              the pending code: its hash, the number it was
@@ -86,7 +89,7 @@ def check_code(session, code):
     """Check the code the customer typed.
 
     Returns (outcome, details):
-      ("verified", {"mobile": ...})          the number is now trusted
+      ("verified", {"mobile": ...})          right code: the caller saves the number
       ("wrong_code", {"attempts_left": n})   try again
       ("locked", {})                         too many wrong codes
       ("expired", {})                        no code waiting, or too old
@@ -103,7 +106,8 @@ def check_code(session, code):
         typed = re.sub(r"\D", "", code or "")  # "123 456" -> "123456"
         # compare_digest takes the same time however much of it matches.
         if hmac.compare_digest(_hash(pending["mobile"], typed), pending["hash"]):
-            session["verified_mobile"] = pending["mobile"]
+            # The caller saves the number where it belongs: the chat
+            # conversation (tools.py) or the browser session (website.py).
             session["otp"] = None
             return "verified", {"mobile": pending["mobile"]}
 

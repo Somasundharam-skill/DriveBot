@@ -2,6 +2,7 @@
 
 Perfox sends JSON-RPC 2.0 messages to  POST /mcp  and we answer with
 plain JSON. There is also  GET /health  for a quick "is it up?" check.
+The test website (GET / and /api/...) lives in website.py.
 
 Run it with:  uv run python -m app.server
 """
@@ -18,7 +19,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
-from app import config, log, tools
+from app import config, log, tools, website
 
 SERVER_INFO = {"name": "drivebot-mcp", "version": "0.1.0"}
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
@@ -54,7 +55,18 @@ async def lifespan(app):
     stop.set()
 
 
-app = FastAPI(title="DriveBot MCP server", version=SERVER_INFO["version"], lifespan=lifespan)
+# The automatic API pages (/docs, /redoc, /openapi.json) only when ENABLE_DOCS=true.
+app = FastAPI(
+    title="DriveBot MCP server",
+    version=SERVER_INFO["version"],
+    lifespan=lifespan,
+    docs_url="/docs" if config.ENABLE_DOCS else None,
+    redoc_url="/redoc" if config.ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if config.ENABLE_DOCS else None,
+)
+
+# The test website and its login API (see website.py).
+app.include_router(website.router)
 
 
 # ----------------------------------------------------------------------
@@ -101,6 +113,9 @@ def read_caller(request):
         "external_id": headers.get("X-Sa-End-User-External-Id"),
         "channel": headers.get("X-Sa-Channel"),
         "conversation_id": headers.get("X-Sa-Conversation-Id"),
+        # Our website's chat_token, passed on by Perfox ('identify'). Secret:
+        # never log it.
+        "user_token": headers.get("X-Sa-User-Token"),
     }
 
 
@@ -199,6 +214,10 @@ def log_startup_warnings():
 
 
 log_startup_warnings()
+
+# Static files from web/ (index.html at "/"). Added LAST, so /mcp, /health,
+# /api/... and /docs are matched first.
+website.serve_static_files(app)
 
 if __name__ == "__main__":
     log.info("server_starting", host=config.HOST, port=config.PORT, mode=config.DCC_MODE)

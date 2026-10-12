@@ -43,6 +43,10 @@ PORT = int(_number("PORT", 8000))
 KEEP_ALIVE_URL = _text("KEEP_ALIVE_URL")
 KEEP_ALIVE_SECONDS = _number("KEEP_ALIVE_SECONDS", 300)  # every 5 minutes
 
+# Show FastAPI's automatic API pages (/docs)? Off by default, because the
+# server is public on Render.
+ENABLE_DOCS = _yes_no("ENABLE_DOCS")
+
 # --- DriveCarClub API --------------------------------------------------
 DCC_MODE = _text("DCC_MODE", "mock").lower()  # "mock" or "live"
 DCC_TOKEN_URL = _text(

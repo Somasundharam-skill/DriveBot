@@ -3,7 +3,9 @@
 SOP 5 rule 1: DriveBot only looks up a TRUSTED number.
   - Phone call, WhatsApp, SMS: the number Perfox gives us is trusted.
   - Website chat: anyone can type any number, so it is only trusted after
-    an OTP check (otp.py sets "verified_mobile" on the session).
+    an OTP check: either a login on our website (browser_sessions.py,
+    found through the X-Sa-User-Token header), or an OTP in the chat
+    ("verified_mobile" on the conversation session).
 The booking tools NEVER take the phone number from the AI's tool arguments.
 The only place a typed number is accepted is send_otp, which just texts a
 code to it and returns no booking data.
@@ -13,7 +15,7 @@ import re
 import threading
 import time
 
-from app import config
+from app import browser_sessions, config
 
 # Channels where the phone number comes from the network, not from typing.
 TRUSTED_CHANNELS = ("phone", "whatsapp", "sms")
@@ -80,6 +82,18 @@ def find_trusted_mobile(caller):
         return None, "no_trusted_number"
 
     if channel == "web":
+        # Shared login: if Perfox passed our website's chat_token, the
+        # website session decides, and any chat-level OTP is ignored. That
+        # way logging out on the website also logs out the chat.
+        status, browser = browser_sessions.find_by_chat_token(caller.get("user_token"))
+        if status == "live":
+            if browser["mobile"]:
+                return browser["mobile"], None
+            return None, "verification_needed"
+        if status == "retired":
+            return None, "verification_needed"
+
+        # No website token (or one we don't know): chat-level OTP.
         session = get_session(caller.get("conversation_id"))
         if session.get("verified_mobile"):
             return session["verified_mobile"], None  # passed OTP

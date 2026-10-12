@@ -16,7 +16,7 @@ today's and upcoming pickups only.
 
 import time
 
-from app import config, identity, log, mapper, otp
+from app import browser_sessions, config, identity, log, mapper, otp
 from app.errors import DCCUnavailable, SMSUnavailable
 
 # ----------------------------------------------------------------------
@@ -86,7 +86,7 @@ TOOLS = [
             "'verification_needed' and the customer has told you their mobile number. "
             "Never read the number back to the customer and never guess or invent one. "
             "The result has an 'outcome' (sent, not_needed, invalid_number, "
-            "too_many_requests, locked, unavailable) and a 'say' field: tell the customer "
+            "too_many_requests, locked, session_ended, unavailable) and a 'say' field: tell the customer "
             "what 'say' says, in their language. When the outcome is 'sent', wait for the "
             "customer to tell you the code, then call verify_otp. You never see the code "
             "yourself."
@@ -186,7 +186,7 @@ def get_client():
     return _client
 
 
-def _load_current_bookings(mobile):
+def load_current_bookings(mobile):
     """Fetch the caller's bookings and keep only today's and upcoming ones.
 
     Raises DCCUnavailable if DriveCarClub fails.
@@ -205,7 +205,7 @@ def _load_current_bookings(mobile):
 
 
 def check_dispatch_status(mobile):
-    bookings = _load_current_bookings(mobile)
+    bookings = load_current_bookings(mobile)
 
     if not bookings:
         return {
@@ -274,7 +274,7 @@ def get_chauffeur_details(mobile, booking_ref):
 
     # Always fetch again: the chauffeur may have changed (SOP 6 rule 5), and
     # this proves the booking belongs to THIS caller's number.
-    bookings = _load_current_bookings(mobile)
+    bookings = load_current_bookings(mobile)
     booking = next((b for b in bookings if b["booking_ref"].lower() == wanted), None)
     if booking is None:
         return not_found  # not theirs, past, or finished: reveal nothing
@@ -344,6 +344,15 @@ def send_otp(caller, mobile_number):
             "say": "That doesn't look like an Indian mobile number. Could you check it and tell me again?",
         }, None
 
+    # An old website token (the customer logged out in another tab): a chat
+    # OTP would not count, so ask them to refresh the page instead.
+    status, _ = browser_sessions.find_by_chat_token(caller.get("user_token"))
+    if status == "retired":
+        return {
+            "outcome": "session_ended",
+            "say": "Your website session has ended. Please refresh the page and ask me again.",
+        }, mobile
+
     session = identity.get_session(caller.get("conversation_id"))
     outcome = otp.send_code(session, mobile)  # may raise SMSUnavailable
 
@@ -380,6 +389,12 @@ def verify_otp(caller, code):
     outcome, details = otp.check_code(session, code)
 
     if outcome == "verified":
+        session["verified_mobile"] = details["mobile"]
+        # Shared login: if the customer is on our website, sign the browser
+        # in too, so the website shows them as signed in.
+        status, browser = browser_sessions.find_by_chat_token(caller.get("user_token"))
+        if status == "live":
+            browser["mobile"] = details["mobile"]
         return {
             "outcome": "verified",
             "say": "Thank you, your number is verified.",

@@ -1,0 +1,591 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DriveBot test page · DriveCarClub pilot</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #14213d;
+    --ink-soft: #2b3a5c;
+    --paper: #eef1f4;
+    --card: #ffffff;
+    --brass: #a8834f;
+    --slate: #5b6676;
+    --line: #d5dbe3;
+    --ok: #1f7a55;
+    --head: "Sora", "Segoe UI", system-ui, sans-serif;
+    --body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font: 400 1.0625rem/1.6 var(--body);
+  }
+  a { color: var(--ink); }
+  :focus-visible { outline: 3px solid var(--brass); outline-offset: 2px; }
+
+  .notice {
+    background: var(--ink);
+    color: #fff;
+    font-size: .9375rem;
+    padding: .6rem 1.25rem;
+    text-align: center;
+  }
+  .notice strong { color: #e8cfa6; font-weight: 600; }
+
+  .wrap { max-width: 68rem; margin: 0 auto; padding: 0 1.25rem; }
+
+  header.site {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 1.4rem 0;
+  }
+  .brand { font: 700 1.25rem/1 var(--head); letter-spacing: -.01em; }
+  .brand span { color: var(--brass); }
+  .site small { color: var(--slate); font-size: .9375rem; }
+
+  /* Hero: the pickup slip is the one memorable element */
+  .hero {
+    display: grid; gap: 3rem; align-items: center;
+    grid-template-columns: 1.1fr .9fr;
+    padding: 3rem 0 4rem;
+  }
+  .hero h1 {
+    font: 700 clamp(2.2rem, 5vw, 3.6rem)/1.08 var(--head);
+    letter-spacing: -.025em;
+    margin: 0 0 1.25rem;
+    max-width: 14ch;
+  }
+  .hero p { color: var(--ink-soft); max-width: 34rem; margin: 0 0 1.5rem; font-size: 1.15rem; }
+  .hint {
+    display: inline-flex; gap: .6rem; align-items: center;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 999px; padding: .55rem 1rem; font-size: .975rem;
+  }
+  .dot { width: .6rem; height: .6rem; border-radius: 50%; background: var(--ok); }
+
+  .slip {
+    background: var(--card);
+    border-radius: 18px;
+    box-shadow: 0 1px 0 var(--line), 0 24px 48px -28px rgba(20, 33, 61, .45);
+    overflow: hidden;
+    transform: rotate(-1.5deg);
+  }
+  .slip-top { background: var(--ink); color: #fff; padding: 1.1rem 1.4rem; display: flex; justify-content: space-between; align-items: baseline; }
+  .slip-top b { font: 600 1rem var(--head); }
+  .slip-top span { color: #c9d2e3; font-size: .9rem; }
+  .slip-body { padding: 1.4rem; display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem 1.5rem; }
+  .slip-body dt { color: var(--slate); font-size: .875rem; }
+  .slip-body dd { margin: .1rem 0 0; font: 600 1.15rem/1.3 var(--head); }
+  .plate {
+    grid-column: 1 / -1;
+    border-top: 2px dashed var(--line);
+    padding-top: 1.1rem;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .plate .reg {
+    font: 700 1.3rem var(--head); letter-spacing: .06em;
+    border: 2px solid var(--ink); border-radius: 6px; padding: .2rem .7rem;
+  }
+  .plate .status { color: var(--ok); font-weight: 600; }
+
+  /* Testing guide */
+  section.guide { padding: 3.5rem 0 5rem; border-top: 1px solid var(--line); }
+  .guide h2 { font: 600 1.75rem/1.2 var(--head); letter-spacing: -.015em; margin: 0 0 .5rem; }
+  .guide > .wrap > p { color: var(--ink-soft); margin: 0 0 2rem; max-width: 40rem; }
+  .cols { display: grid; grid-template-columns: .9fr 1.1fr; gap: 2.5rem; align-items: start; }
+  ol.steps { margin: 0; padding-left: 1.3rem; }
+  ol.steps li { margin-bottom: .9rem; padding-left: .3rem; }
+  code {
+    font-family: ui-monospace, Consolas, monospace; font-size: .95em;
+    background: #e3e8ee; padding: .05rem .35rem; border-radius: 4px;
+  }
+  .table-scroll { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+  table { border-collapse: collapse; width: 100%; min-width: 30rem; font-size: .975rem; }
+  th, td { text-align: left; padding: .7rem 1rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { font: 600 .9rem var(--head); color: var(--slate); background: #f6f8fa; }
+  tr:last-child td { border-bottom: 0; }
+  td:first-child { white-space: nowrap; font-family: ui-monospace, Consolas, monospace; }
+
+  footer { color: var(--slate); font-size: .9rem; padding: 0 0 6rem; }
+
+  /* Log in / signed in, in the header */
+  .site-left { display: flex; flex-direction: column; gap: .3rem; }
+  .auth { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; justify-content: flex-end; }
+  .auth .who { color: var(--ink-soft); font-size: .975rem; }
+  .auth .who b { font-family: var(--head); font-weight: 600; letter-spacing: .04em; }
+  .btn {
+    font: 600 .95rem/1 var(--head); cursor: pointer;
+    border-radius: 999px; padding: .7rem 1.15rem; min-height: 2.75rem;
+    border: 2px solid var(--ink); background: var(--ink); color: #fff;
+  }
+  .btn:hover { background: var(--ink-soft); border-color: var(--ink-soft); }
+  .btn.ghost { background: transparent; color: var(--ink); }
+  .btn.ghost:hover { background: #e3e8ee; }
+  .btn.link { border: 0; background: none; color: var(--ink); text-decoration: underline; padding: .4rem 0; min-height: 0; }
+  .btn[disabled] { opacity: .6; cursor: wait; }
+
+  /* Your pickups */
+  section.pickups { padding: 0 0 3.5rem; }
+  .pickups h2 { font: 600 1.5rem/1.2 var(--head); letter-spacing: -.015em; margin: 0 0 1rem; }
+  .pickup-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 1.25rem; grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr)); }
+  .pickup-list .slip { transform: none; animation: none; }
+  .pickups .status-msg { color: var(--ink-soft); margin: 0; }
+
+  /* Login dialog */
+  dialog.login {
+    border: 0; border-radius: 18px; padding: 0; width: min(26rem, calc(100vw - 2rem));
+    color: var(--ink); background: var(--card);
+    box-shadow: 0 24px 64px -24px rgba(20, 33, 61, .55);
+  }
+  dialog.login::backdrop { background: rgba(20, 33, 61, .45); }
+  .login-top { background: var(--ink); color: #fff; padding: 1.1rem 1.4rem; display: flex; justify-content: space-between; align-items: center; }
+  .login-top h2 { font: 600 1.15rem var(--head); margin: 0; }
+  .login-top .close { background: none; border: 0; color: #fff; font-size: 1.6rem; line-height: 1; cursor: pointer; padding: .2rem .5rem; border-radius: 6px; }
+  .login form { padding: 1.4rem; display: grid; gap: .9rem; }
+  .login form[hidden] { display: none; }
+  .login label { font-weight: 600; }
+  .login .help { color: var(--slate); font-size: .925rem; margin: -.5rem 0 0; }
+  .login input {
+    font: 600 1.15rem var(--head); letter-spacing: .04em;
+    padding: .7rem .85rem; border: 2px solid var(--line); border-radius: 10px; width: 100%;
+    color: var(--ink); background: #fff;
+  }
+  .login input:focus-visible { border-color: var(--brass); outline: none; }
+  .login input[aria-invalid="true"] { border-color: #b3261e; }
+  .login .error { color: #b3261e; font-weight: 600; margin: 0; }
+  .login .error:empty { display: none; }
+  .login .row { display: flex; gap: 1rem; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+
+  @media (max-width: 820px) {
+    .hero, .cols { grid-template-columns: 1fr; }
+    .hero { padding-top: 1.5rem; gap: 2.5rem; }
+    .slip { transform: none; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .slip { animation: settle .7s ease-out both; }
+    @keyframes settle { from { opacity: 0; transform: rotate(-4deg) translateY(12px); } }
+  }
+</style>
+</head>
+<body>
+
+<div class="notice" role="note">
+  <strong>Test page.</strong> This is a pilot test site for DriveBot, not the official DriveCarClub website. All bookings shown are fake.
+</div>
+
+<div class="wrap">
+  <header class="site">
+    <div class="site-left">
+      <div class="brand">DriveCar<span>Club</span></div>
+      <small>Corporate cars and chauffeurs</small>
+    </div>
+
+    <!-- Filled in by the script at the bottom: "Log in", or "Signed in as ••••0001" + "Log out" -->
+    <div class="auth">
+      <button type="button" class="btn" id="login-open">Log in</button>
+      <span class="who" id="signed-in-as" hidden>Signed in as <b id="masked-mobile"></b></span>
+      <button type="button" class="btn ghost" id="logout" hidden>Log out</button>
+    </div>
+  </header>
+
+  <main class="hero">
+    <div>
+      <h1>Your car, your chauffeur, one message away.</h1>
+      <p>Ask DriveBot whether your car has been sent and who is driving it. It answers any time, in your language.</p>
+      <div class="hint"><span class="dot" aria-hidden="true"></span>Open the chat in the corner to start</div>
+    </div>
+
+    <aside class="slip" aria-label="Example of the details DriveBot shares">
+      <div class="slip-top"><b>Pickup today</b><span>Example</span></div>
+      <dl class="slip-body">
+        <div><dt>Time</dt><dd>6:30 PM</dd></div>
+        <div><dt>Area</dt><dd>Koramangala</dd></div>
+        <div><dt>Chauffeur</dt><dd>Ramesh</dd></div>
+        <div><dt>Car</dt><dd>White Innova Crysta</dd></div>
+        <div class="plate"><span class="reg">KA 01 AB 1234</span><span class="status">Car sent</span></div>
+      </dl>
+    </aside>
+  </main>
+
+  <!-- Shown only when signed in -->
+  <section class="pickups" id="pickups" aria-labelledby="pickups-title" hidden>
+    <h2 id="pickups-title">Your pickups</h2>
+    <p class="status-msg" id="pickups-status" role="status"></p>
+    <ul class="pickup-list" id="pickup-list"></ul>
+  </section>
+</div>
+
+<!-- Login: step 1 asks for the mobile number, step 2 for the 6-digit code -->
+<dialog class="login" id="login-dialog" aria-labelledby="login-title">
+  <div class="login-top">
+    <h2 id="login-title">Log in</h2>
+    <button type="button" class="close" id="login-close" aria-label="Close">&times;</button>
+  </div>
+
+  <form id="mobile-form" novalidate>
+    <label for="mobile-input">Mobile number</label>
+    <p class="help" id="mobile-help">We'll text you a 6-digit code.</p>
+    <input id="mobile-input" name="mobile" type="tel" inputmode="numeric" autocomplete="tel"
+           placeholder="98765 43210" aria-describedby="mobile-help mobile-error" required>
+    <p class="error" id="mobile-error" role="alert"></p>
+    <button type="submit" class="btn">Send code</button>
+  </form>
+
+  <form id="code-form" novalidate hidden>
+    <label for="code-input">6-digit code</label>
+    <p class="help" id="code-help">Enter the code we sent by SMS. In testing it's always <code>123456</code>.</p>
+    <input id="code-input" name="code" type="text" inputmode="numeric" autocomplete="one-time-code"
+           maxlength="7" placeholder="123456" aria-describedby="code-help code-error" required>
+    <p class="error" id="code-error" role="alert"></p>
+    <button type="submit" class="btn">Log in</button>
+    <div class="row">
+      <button type="button" class="btn link" id="change-number">Use a different number</button>
+      <button type="button" class="btn link" id="resend-code">Send a new code</button>
+    </div>
+  </form>
+</dialog>
+
+<section class="guide" aria-labelledby="guide-title">
+  <div class="wrap">
+    <h2 id="guide-title">How to test DriveBot</h2>
+    <p>DriveBot is connected to test data, so you can try every situation safely. The website and the chat share one login: log in on either, and the other knows. The code is always <code>123456</code> in testing, and no real SMS is sent.</p>
+
+    <div class="cols">
+      <ol class="steps">
+        <li><strong>Chat first:</strong> open the chat and ask <em>"Has my car been sent?"</em> Give a test number from the table, then the code <code>123456</code>. The header here then shows you as signed in.</li>
+        <li><strong>Website first:</strong> click <em>Log in</em>, enter a test number and <code>123456</code>. Your pickups appear, and the chat answers straight away without asking for a code.</li>
+        <li>Ask follow-ups such as <em>"Who is my driver?"</em></li>
+        <li>Click <em>Log out</em>. The chat starts fresh and asks for a code again.</li>
+        <li>Log out and back in to try another number.</li>
+      </ol>
+
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>Test number</th><th>What you should see</th></tr></thead>
+          <tbody>
+            <tr><td>9000000001</td><td>One booking today in Koramangala, chauffeur Ramesh</td></tr>
+            <tr><td>9000000002</td><td>Two current bookings; DriveBot asks which one</td></tr>
+            <tr><td>9000000003</td><td>No car sent yet</td></tr>
+            <tr><td>9000000004</td><td>Booking found, chauffeur not assigned yet</td></tr>
+            <tr><td>9000000005</td><td>System down; DriveBot shares the support number</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="wrap">
+  <footer>DriveBot pilot test page. Built for testing with fake data only.</footer>
+</div>
+
+<!--
+  =====================================================================
+  PASTE THE PERFOX EMBED CODE BELOW THIS LINE
+
+  Where to get it: Perfox Studio, open DriveBot, click the Web Chat
+  node, open "Install", add this site's address to "Allowed origins"
+  (the Render URL, https://drivebot-dczp.onrender.com),
+  click "Generate Credentials" and copy the embed code.
+  Leave "Require HMAC identity verification" OFF for this test page,
+  and don't add an external_id: the script below does 'identify'.
+  =====================================================================
+-->
+
+
+
+<!-- END OF PERFOX EMBED CODE -->
+
+<script>
+/*
+  Shared login between this page and the DriveBot chat.
+
+  - /api/session tells us who is signed in, and gives a "chat_token".
+  - We pass the chat_token to Perfox ('identify'). Perfox sends it to our
+    server with every tool call, so the chat knows who is signed in here.
+  - Log in on the page: the chat doesn't ask for a code.
+    Log in in the chat: this page notices and shows you as signed in.
+    Log out on the page: the chat needs a code again.
+*/
+(function () {
+  "use strict";
+
+  // ------------------------------------------------------------------
+  // Talking to Perfox, even before its script has loaded.
+  // The embed code normally creates window.Perfox straight away (a small
+  // queue that remembers calls until the real script arrives). If it
+  // isn't there yet, we keep the calls here and pass them on later.
+  // ------------------------------------------------------------------
+  var waitingForPerfox = [];
+
+  function perfox() {
+    var args = Array.prototype.slice.call(arguments);
+    if (typeof window.Perfox === "function") {
+      window.Perfox.apply(window, args);
+    } else {
+      waitingForPerfox.push(args);
+    }
+  }
+
+  var perfoxChecks = 0;
+  var perfoxTimer = setInterval(function () {
+    if (typeof window.Perfox === "function") {
+      clearInterval(perfoxTimer);
+      waitingForPerfox.splice(0).forEach(function (args) { window.Perfox.apply(window, args); });
+    } else if (++perfoxChecks > 120) {
+      clearInterval(perfoxTimer); // give up after a minute (no embed code yet)
+    }
+  }, 500);
+
+  // ------------------------------------------------------------------
+  // Page elements
+  // ------------------------------------------------------------------
+  function $(id) { return document.getElementById(id); }
+
+  var loginOpen = $("login-open"), logoutBtn = $("logout");
+  var signedInAs = $("signed-in-as"), maskedMobile = $("masked-mobile");
+  var pickups = $("pickups"), pickupsStatus = $("pickups-status"), pickupList = $("pickup-list");
+  var dialog = $("login-dialog");
+  var mobileForm = $("mobile-form"), mobileInput = $("mobile-input"), mobileError = $("mobile-error");
+  var codeForm = $("code-form"), codeInput = $("code-input"), codeError = $("code-error");
+
+  // ------------------------------------------------------------------
+  // Calling our server
+  // ------------------------------------------------------------------
+  function getJSON(url) {
+    return fetch(url, { credentials: "same-origin", cache: "no-store" }).then(readReply);
+  }
+
+  function postJSON(url, body) {
+    return fetch(url, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {})
+    }).then(readReply);
+  }
+
+  function readReply(response) {
+    return response.json()
+      .catch(function () { return {}; })
+      .then(function (data) { return { ok: response.ok, status: response.status, data: data }; });
+  }
+
+  // ------------------------------------------------------------------
+  // Who is signed in? Keep the header, the pickups and Perfox up to date.
+  // ------------------------------------------------------------------
+  var current = null; // the last /api/session answer
+
+  function refreshSession(forceIdentify) {
+    return getJSON("/api/session").then(function (reply) {
+      if (!reply.ok) return;
+      var now = reply.data;
+      var first = current === null;
+
+      // Tell Perfox on every page load, after a login, and whenever the token changes.
+      if (first || forceIdentify || now.chat_token !== current.chat_token) {
+        perfox("identify", { tenant_session_token: now.chat_token });
+      }
+      var changed = first || now.signed_in !== current.signed_in || now.masked_mobile !== current.masked_mobile;
+      current = now;
+      if (changed) showSignedIn();
+    }).catch(function () { /* offline: try again next time */ });
+  }
+
+  function showSignedIn() {
+    var signedIn = current && current.signed_in;
+    loginOpen.hidden = signedIn;
+    signedInAs.hidden = !signedIn;
+    logoutBtn.hidden = !signedIn;
+    maskedMobile.textContent = signedIn ? current.masked_mobile : "";
+    pickups.hidden = !signedIn;
+    if (signedIn) loadPickups(); else pickupList.textContent = "";
+  }
+
+  // ------------------------------------------------------------------
+  // Your pickups
+  // ------------------------------------------------------------------
+  function loadPickups() {
+    pickupsStatus.textContent = "Loading your pickups…";
+    pickupList.textContent = "";
+    getJSON("/api/my-pickups").then(function (reply) {
+      if (!reply.ok) {
+        pickupsStatus.textContent = reply.data.message || "We can't load your pickups right now.";
+        return;
+      }
+      var list = reply.data.pickups || [];
+      pickupsStatus.textContent = list.length
+        ? "You have " + list.length + (list.length === 1 ? " pickup" : " pickups") + " today or coming up."
+        : "No pickups today or coming up.";
+      list.forEach(function (pickup) { pickupList.appendChild(pickupCard(pickup)); });
+    }).catch(function () {
+      pickupsStatus.textContent = "We can't load your pickups right now.";
+    });
+  }
+
+  // Build one card with textContent only (never innerHTML), so data can't inject code.
+  function pickupCard(p) {
+    function el(tag, className, text) {
+      var node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text != null) node.textContent = text;
+      return node;
+    }
+    function detail(label, value) {
+      var box = el("div");
+      box.appendChild(el("dt", null, label));
+      box.appendChild(el("dd", null, value || "–"));
+      return box;
+    }
+
+    var card = el("li", "slip");
+    var top = el("div", "slip-top");
+    top.appendChild(el("b", null, "Pickup " + (p.when || "")));
+    top.appendChild(el("span", null, p.booking_ref));
+    card.appendChild(top);
+
+    var body = el("dl", "slip-body");
+    body.appendChild(detail("Area", p.pickup_area));
+    body.appendChild(detail("Status", p.dispatch_status));
+    if (p.chauffeur_allocated) {
+      body.appendChild(detail("Chauffeur", p.chauffeur_first_name));
+      body.appendChild(detail("Car", [p.car_colour, p.car_model].filter(Boolean).join(" ")));
+      var plate = el("div", "plate");
+      plate.appendChild(el("span", "reg", p.registration_number));
+      plate.appendChild(el("span", "status", "Car sent"));
+      body.appendChild(plate);
+    } else {
+      var waiting = el("div", "plate");
+      waiting.appendChild(el("span", null, "Chauffeur not assigned yet"));
+      body.appendChild(waiting);
+    }
+    card.appendChild(body);
+    return card;
+  }
+
+  // ------------------------------------------------------------------
+  // Login dialog
+  // ------------------------------------------------------------------
+  function showError(input, box, text) {
+    box.textContent = text || "";
+    input.setAttribute("aria-invalid", text ? "true" : "false");
+    if (text) input.focus();
+  }
+
+  function busy(form, isBusy) {
+    Array.prototype.forEach.call(form.querySelectorAll("button"), function (b) { b.disabled = isBusy; });
+  }
+
+  function showMobileStep() {
+    codeForm.hidden = true;
+    mobileForm.hidden = false;
+    showError(mobileInput, mobileError, "");
+    mobileInput.focus();
+  }
+
+  function showCodeStep() {
+    mobileForm.hidden = true;
+    codeForm.hidden = false;
+    codeInput.value = "";
+    showError(codeInput, codeError, "");
+    codeInput.focus();
+  }
+
+  function sendCode() {
+    var digits = mobileInput.value.replace(/\D/g, "");
+    if (digits.length < 10) {
+      showError(mobileInput, mobileError, "Please enter a valid 10-digit mobile number.");
+      return Promise.resolve();
+    }
+    busy(mobileForm, true);
+    busy(codeForm, true);
+    return postJSON("/api/login/send-code", { mobile: mobileInput.value }).then(function (reply) {
+      if (reply.ok) {
+        showCodeStep();
+      } else if (!codeForm.hidden) {
+        showError(codeInput, codeError, reply.data.message || "Something went wrong. Please try again.");
+      } else {
+        showError(mobileInput, mobileError, reply.data.message || "Something went wrong. Please try again.");
+      }
+    }).catch(function () {
+      showError(mobileInput, mobileError, "We couldn't reach the server. Please try again.");
+    }).then(function () {
+      busy(mobileForm, false);
+      busy(codeForm, false);
+    });
+  }
+
+  loginOpen.addEventListener("click", function () {
+    mobileInput.value = "";
+    dialog.showModal(); // keeps keyboard focus inside; Esc closes it
+    showMobileStep();
+  });
+
+  $("login-close").addEventListener("click", function () { dialog.close(); });
+  dialog.addEventListener("close", function () { loginOpen.hidden || loginOpen.focus(); });
+
+  mobileForm.addEventListener("submit", function (event) {
+    event.preventDefault();
+    sendCode();
+  });
+
+  codeForm.addEventListener("submit", function (event) {
+    event.preventDefault();
+    if (codeInput.value.replace(/\D/g, "").length !== 6) {
+      showError(codeInput, codeError, "Please enter the 6-digit code.");
+      return;
+    }
+    busy(codeForm, true);
+    postJSON("/api/login/verify", { code: codeInput.value }).then(function (reply) {
+      if (reply.ok) {
+        dialog.close();
+        // Ask again who is signed in, and tell Perfox again.
+        return refreshSession(true).then(function () { logoutBtn.focus(); });
+      }
+      showError(codeInput, codeError, reply.data.message || "Something went wrong. Please try again.");
+    }).catch(function () {
+      showError(codeInput, codeError, "We couldn't reach the server. Please try again.");
+    }).then(function () { busy(codeForm, false); });
+  });
+
+  $("change-number").addEventListener("click", showMobileStep);
+  $("resend-code").addEventListener("click", sendCode);
+
+  // ------------------------------------------------------------------
+  // Log out: the chat forgets the conversation and gets a new token.
+  // ------------------------------------------------------------------
+  logoutBtn.addEventListener("click", function () {
+    logoutBtn.disabled = true;
+    postJSON("/api/logout").then(function (reply) {
+      if (!reply.ok) return;
+      perfox("shutdown");          // the chat forgets this user and conversation
+      return refreshSession(true); // new chat_token -> 'identify' again
+    }).catch(function () { /* offline: stay as we are */ }).then(function () {
+      logoutBtn.disabled = false;
+      if (!loginOpen.hidden) loginOpen.focus();
+    });
+  });
+
+  // ------------------------------------------------------------------
+  // Notice a login that happened in the chat.
+  // ------------------------------------------------------------------
+  perfox("on", "message:received", function () { refreshSession(false); });
+  window.addEventListener("focus", function () { refreshSession(false); });
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) refreshSession(false);
+  });
+
+  // First load.
+  refreshSession(false);
+})();
+</script>
+
+</body>
+</html>

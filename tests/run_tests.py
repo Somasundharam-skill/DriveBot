@@ -15,6 +15,7 @@ os.environ["TRUST_WEB_PHONE"] = "false"
 os.environ["DCC_TIMEOUT_SECONDS"] = "1"
 os.environ["OTP_MODE"] = "mock"  # no SMS; the code is always 123456
 os.environ["KEEP_ALIVE_URL"] = ""  # never ping the real server from tests
+os.environ["ENABLE_DOCS"] = "false"
 
 import base64
 import json
@@ -27,7 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fastapi.testclient import TestClient
 
-from app import config, identity, otp, sms
+from app import browser_sessions, config, identity, otp, sms
 from app.drivecarclub import DriveCarClubClient
 from app.errors import DCCUnavailable, SMSUnavailable
 from app.mapper import INDIA
@@ -75,13 +76,15 @@ def rpc(method, params=None, headers=None, message_id=1):
     return client.post("/mcp", json=body, headers={**AUTH, **(headers or {})})
 
 
-def call(tool, arguments=None, phone=None, channel="phone", conversation_id="conv-test"):
+def call(tool, arguments=None, phone=None, channel="phone", conversation_id="conv-test", user_token=None):
     """Call a tool the way Perfox does. Returns (result dict, raw text)."""
     headers = {"X-Sa-Conversation-Id": conversation_id}
     if channel:
         headers["X-Sa-Channel"] = channel
     if phone:
         headers["X-Sa-End-User-Phone"] = phone
+    if user_token:
+        headers["X-Sa-User-Token"] = user_token  # our website's chat_token, via Perfox
     response = rpc("tools/call", {"name": tool, "arguments": arguments or {}}, headers)
     text = response.json()["result"]["content"][0]["text"]
     return json.loads(text), text
@@ -438,7 +441,204 @@ check("OTP tool logs mask the mobile",
       otp_logs and all(entry["mobile"] in (None, "91******0001") for entry in otp_logs), otp_logs)
 
 # ----------------------------------------------------------------------
-# 6. Logging
+# 6. Shared login: test website + chat
+# ----------------------------------------------------------------------
+print("\n--- shared login (website + chat) ---")
+
+SITE = "https://testserver"
+SAME_ORIGIN = {"Origin": SITE}
+web_replies = []  # every website response body, to check nothing leaks
+log_lines.clear()
+
+
+def browser():
+    """A new browser with its own cookies. HTTPS, because the cookie is Secure."""
+    return TestClient(app, base_url=SITE)
+
+
+def site_get(browser_client, path):
+    response = browser_client.get(path)
+    web_replies.append(response.text)
+    return response
+
+
+def site_post(browser_client, path, body=None, headers=SAME_ORIGIN):
+    response = browser_client.post(path, json=body or {}, headers=headers)
+    web_replies.append(response.text)
+    return response
+
+
+def web_login(browser_client, mobile):
+    site_post(browser_client, "/api/login/send-code", {"mobile": mobile})
+    return site_post(browser_client, "/api/login/verify", {"code": MOCK_CODE})
+
+
+def sid_of(browser_client):
+    return browser_client.cookies.get("dcc_sid")
+
+
+# The page and the API docs.
+response = browser().get("/")
+check("GET / serves the test page", response.status_code == 200 and "DriveCar" in response.text)
+check("/mcp and /health still work", client.get("/health").json()["ok"] is True)
+check("/docs is off unless ENABLE_DOCS=true", client.get("/docs").status_code == 404)
+
+# A new visitor.
+browser_a = browser()
+response = site_get(browser_a, "/api/session")
+session_a = response.json()
+cookie_header = response.headers.get("set-cookie", "").lower()
+check("new visitor -> signed out with a chat_token",
+      session_a["signed_in"] is False and session_a["masked_mobile"] is None and len(session_a["chat_token"]) > 30,
+      session_a)
+check("cookie dcc_sid is HttpOnly, Secure and SameSite=Lax",
+      "dcc_sid=" in cookie_header and "httponly" in cookie_header and "secure" in cookie_header
+      and "samesite=lax" in cookie_header, cookie_header)
+check("the chat_token is not the cookie value", session_a["chat_token"] != sid_of(browser_a))
+check("session answers are not cached", response.headers.get("cache-control") == "no-store")
+check("same browser keeps the same session",
+      site_get(browser_a, "/api/session").json()["chat_token"] == session_a["chat_token"])
+
+response = site_get(browser_a, "/api/my-pickups")
+check("my-pickups when signed out -> 401", response.status_code == 401)
+
+# Signed out on the website: the chat needs OTP.
+result, text = call("check_dispatch_status", channel="web", conversation_id="share-a",
+                    user_token=session_a["chat_token"])
+check("chat with a signed-out website token -> verification_needed",
+      result["outcome"] == "verification_needed", text)
+
+# Website login.
+old_sid = sid_of(browser_a)
+response = site_post(browser_a, "/api/login/send-code", {"mobile": "90000 00001"})
+check("web send-code -> sent", response.status_code == 200 and response.json()["outcome"] == "sent", response.text)
+response = site_post(browser_a, "/api/login/verify", {"code": "000000"})
+check("web wrong code -> 400 wrong_code with tries left",
+      response.status_code == 400 and response.json().get("attempts_left") == 2, response.text)
+response = site_post(browser_a, "/api/login/verify", {"code": MOCK_CODE})
+check("web verify with the mock code -> signed in",
+      response.status_code == 200 and response.json()["signed_in"] is True, response.text)
+check("cookie value changes after logging in", sid_of(browser_a) and sid_of(browser_a) != old_sid)
+session_a = site_get(browser_a, "/api/session").json()
+check("/api/session shows the masked mobile only",
+      session_a["signed_in"] is True and session_a["masked_mobile"] == "••••0001", session_a)
+
+# The chat uses the website login: no OTP needed.
+result, text = call("check_dispatch_status", channel="web", conversation_id="share-a",
+                    user_token=session_a["chat_token"])
+check("chat with the website's token -> 'one', no OTP", result["outcome"] == "one", text)
+result, text = call("get_chauffeur_details", {"booking_ref": "DCC100101"}, channel="web",
+                    conversation_id="share-a", user_token=session_a["chat_token"])
+check("chat with the website's token -> chauffeur shared", result["outcome"] == "shared", text)
+
+# Your pickups: only the safe fields.
+response = site_get(browser_a, "/api/my-pickups")
+pickups = response.json().get("pickups", [])
+check("my-pickups when signed in -> 1 pickup", response.status_code == 200 and len(pickups) == 1, response.text)
+check("my-pickups has only the safe fields",
+      pickups and set(pickups[0]) == {"booking_ref", "pickup_date", "pickup_time", "pickup_area", "dispatch_status",
+                                      "chauffeur_allocated", "when", "chauffeur_first_name", "car_model",
+                                      "car_colour", "registration_number"}, pickups)
+check("my-pickups has no surname, address, drop or driver mobile",
+      contains_none(response.text, ["Kumar", "Prestige", "Flat", "Airport", "9845012345"]), response.text)
+
+browser_d = browser()
+site_get(browser_d, "/api/session")
+web_login(browser_d, "9000000004")
+pickups = site_get(browser_d, "/api/my-pickups").json().get("pickups", [])
+check("not-allocated pickup has no chauffeur fields",
+      pickups and "chauffeur_first_name" not in pickups[0] and pickups[0]["chauffeur_allocated"] is False, pickups)
+
+browser_e = browser()
+site_get(browser_e, "/api/session")
+web_login(browser_e, "9000000005")
+log_lines_before = len(log_lines)
+response = site_get(browser_e, "/api/my-pickups")
+check("my-pickups when DriveCarClub is down -> 503 + alert",
+      response.status_code == 503 and any("alert_perfox_team" in line for line in log_lines[log_lines_before:]))
+
+# Chat login reaches the website (for that browser only).
+browser_b, browser_c = browser(), browser()
+token_b = site_get(browser_b, "/api/session").json()["chat_token"]
+site_get(browser_c, "/api/session")
+call("send_otp", {"mobile_number": "9000000002"}, channel="web", conversation_id="share-b", user_token=token_b)
+result, text = call("verify_otp", {"code": MOCK_CODE}, channel="web", conversation_id="share-b", user_token=token_b)
+check("chat verify_otp with a website token -> verified", result["outcome"] == "verified", text)
+session_b = site_get(browser_b, "/api/session").json()
+check("chat login -> that browser is signed in", session_b["signed_in"] is True and session_b["masked_mobile"] == "••••0002",
+      session_b)
+check("chat login -> another browser stays signed out",
+      site_get(browser_c, "/api/session").json()["signed_in"] is False)
+
+# Logout: the old token stops working, even if the conversation had OTP.
+old_token = session_a["chat_token"]
+identity.get_session("share-a")["verified_mobile"] = "919000000001"  # as if a chat OTP had happened too
+response = site_post(browser_a, "/api/logout")
+session_a = site_get(browser_a, "/api/session").json()
+check("logout -> signed out with a NEW chat_token",
+      response.status_code == 200 and session_a["signed_in"] is False and session_a["chat_token"] != old_token,
+      session_a)
+check("logout keeps the same cookie", site_get(browser_a, "/api/session").json()["chat_token"] == session_a["chat_token"])
+result, text = call("check_dispatch_status", channel="web", conversation_id="share-a", user_token=old_token)
+check("old chat_token after logout -> verification_needed (ignores chat OTP)",
+      result["outcome"] == "verification_needed", text)
+result, text = call("check_dispatch_status", channel="web", conversation_id="share-a",
+                    user_token=session_a["chat_token"])
+check("new chat_token after logout -> verification_needed (ignores chat OTP)",
+      result["outcome"] == "verification_needed", text)
+result, text = call("send_otp", {"mobile_number": "9000000001"}, channel="web", conversation_id="share-a",
+                    user_token=old_token)
+check("send_otp with an old token -> session_ended (refresh the page)", result["outcome"] == "session_ended", text)
+check("my-pickups after logout -> 401", site_get(browser_a, "/api/my-pickups").status_code == 401)
+
+# An unknown token: the old conversation-level OTP rules.
+result, text = call("check_dispatch_status", channel="web", conversation_id="share-unknown",
+                    user_token="not-a-token-we-gave-out")
+check("unknown token, no chat OTP -> verification_needed", result["outcome"] == "verification_needed", text)
+identity.get_session("share-unknown")["verified_mobile"] = "919000000001"
+result, text = call("check_dispatch_status", channel="web", conversation_id="share-unknown",
+                    user_token="not-a-token-we-gave-out")
+check("unknown token, chat OTP done -> 'one'", result["outcome"] == "one", text)
+
+# Sessions expire after 8 hours without activity.
+token_b = site_get(browser_b, "/api/session").json()["chat_token"]
+browser_sessions._sessions[sid_of(browser_b)]["last_seen"] -= browser_sessions.SESSION_IDLE_SECONDS + 1
+session_b = site_get(browser_b, "/api/session").json()
+check("idle 8 hours -> new signed-out session", session_b["signed_in"] is False and session_b["chat_token"] != token_b)
+result, text = call("check_dispatch_status", channel="web", conversation_id="share-b", user_token=token_b)
+check("expired session's token -> verification_needed", result["outcome"] == "verification_needed", text)
+
+# CSRF: posts from another website are refused.
+response = site_post(browser_d, "/api/logout", headers={"Origin": "https://evil.example"})
+check("POST from a foreign Origin -> 403", response.status_code == 403)
+check("...and nothing happened", site_get(browser_d, "/api/session").json()["signed_in"] is True)
+response = browser_d.post("/api/login/send-code", json={"mobile": "9000000001"})
+check("POST with no Origin -> 403", response.status_code == 403)
+
+# Same limits as the chat.
+browser_f = browser()
+site_get(browser_f, "/api/session")
+response = site_post(browser_f, "/api/login/send-code", {"mobile": "12345"})
+check("web invalid number -> 400 invalid_number", response.status_code == 400 and response.json()["outcome"] == "invalid_number")
+site_post(browser_f, "/api/login/send-code", {"mobile": "9000000003"})
+response = site_post(browser_f, "/api/login/send-code", {"mobile": "9000000003"})
+check("web second send within 30 seconds -> 429", response.status_code == 429)
+
+# Nothing secret in any response or log line.
+all_cookies = [c for b in (browser_a, browser_b, browser_c, browser_d, browser_e, browser_f)
+               for c in b.cookies.values()] + [old_sid]
+all_tokens = [old_token, session_a["chat_token"], token_b]
+check("no full mobile in any website response",
+      all("9000000001" not in t and "9000000002" not in t for t in web_replies))
+check("no code in any website response", all(MOCK_CODE not in t for t in web_replies))
+check("no cookie value in any website response", all(c not in t for c in all_cookies for t in web_replies))
+check("no full mobile, code, cookie or token in any log line",
+      all("9000000001" not in line and "9000000002" not in line and MOCK_CODE not in line
+          and all(secret not in line for secret in all_cookies + all_tokens)
+          for line in log_lines))
+
+# ----------------------------------------------------------------------
+# 7. Logging
 # ----------------------------------------------------------------------
 print("\n--- logging ---")
 
@@ -454,7 +654,7 @@ check("log masks the mobile", entry.get("mobile") == "91******0001", entry)
 check("log never has the full mobile", all("919000000001" not in line for line in log_lines))
 
 # ----------------------------------------------------------------------
-# 7. Live client against a small fake DriveCarClub server
+# 8. Live client against a small fake DriveCarClub server
 # ----------------------------------------------------------------------
 print("\n--- live client (fake DriveCarClub server) ---")
 

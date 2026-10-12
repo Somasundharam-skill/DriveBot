@@ -70,6 +70,9 @@ uv run python -m app.server
 ```
 
 - Health check: open http://127.0.0.1:8000/health. You should see `{"ok": true, "mode": "mock"}`.
+- Test website: open http://127.0.0.1:8000/ (the page in `web/index.html`). Logging in on the
+  page needs HTTPS (the login cookie is `Secure`), so try it on Render. `localhost` also works
+  in Chrome and Firefox.
 - Perfox calls `POST /mcp` with the header `Authorization: Bearer <MCP_API_KEY>`.
 - Perfox runs in the cloud, so it needs a public HTTPS address for this server
   (for example a tunnel such as ngrok while testing, or a hosted server for the pilot).
@@ -144,11 +147,62 @@ production.
   `alert_perfox_team`.
 - SMS sending is in [app/sms.py](app/sms.py), so another provider can be added there later.
 
+### Shared login: test website + chat
+
+The test website and the chat share one login, because they run in the same server:
+
+- **Logged in on the website:** the chat doesn't ask for a code.
+- **Logged in through the chat's code:** the website shows "Signed in as ••••0001".
+- **Logged out on the website:** the chat needs a code again.
+
+**How it works**
+
+1. Each visitor gets a secret cookie, `dcc_sid`. JavaScript can't read it (HttpOnly), and it is
+   only sent over HTTPS. The server keeps a session for it in memory: the verified number (if
+   any) and a separate random **chat token**.
+2. The page asks `GET /api/session` for the chat token and gives it to Perfox:
+   `Perfox('identify', { tenant_session_token: chat_token })`. It does this on every page load
+   and after every login or logout.
+3. Perfox sends the chat token to our server with every tool call, in the
+   `X-Sa-User-Token` header. That's how a tool call finds the website session:
+   - Signed in on the website: the chat uses that number. No code is needed.
+   - Signed out: `verification_needed`, even if this chat did an OTP earlier.
+   - No token, or one we don't know: the normal chat OTP rules (above).
+4. A correct code in the chat (`verify_otp`) also signs in the website session for that token.
+   The page notices this when the bot replies or when you come back to the tab.
+5. Logging out gives the session a **new** chat token. The old one stops working, and the
+   page calls `Perfox('shutdown')` so the chat starts fresh.
+6. A session that isn't used for **8 hours** is removed.
+
+The website login uses the same code rules and limits as the chat (3 sends, 30 seconds apart,
+5 minutes, 3 wrong tries). The page only ever sees `••••0001`, never the full number.
+
+**Website API** (in [app/website.py](app/website.py))
+
+| Endpoint | What it does |
+|---|---|
+| `GET /api/session` | Signed in or not, the masked number, and the chat token |
+| `POST /api/login/send-code` | `{"mobile": "..."}`: texts a code |
+| `POST /api/login/verify` | `{"code": "..."}`: checks it and signs in (and changes the cookie) |
+| `POST /api/logout` | Signs out and makes a new chat token |
+| `GET /api/my-pickups` | Today's and upcoming pickups, with safe fields only. `401` when signed out. |
+
+The `POST` endpoints only accept requests whose `Origin` header is our own site, so other
+websites can't post with a customer's cookie (CSRF protection).
+
+**Perfox setup**
+
+- In Perfox Studio > Web Chat > Install, set **Allowed origins** to the Render URL:
+  `https://drivebot-dczp.onrender.com`. Otherwise the chat widget won't load on the page.
+- Leave **Require HMAC identity verification** off, and don't send `external_id`.
+- Paste the embed code at the marked spot in `web/index.html`.
+
 ## 6. Safety rules (enforced in code, not left to the AI)
 
 1. **Trusted number only.** The booking tools never take the mobile number as an argument.
    - Phone call, WhatsApp, SMS: the `X-Sa-End-User-Phone` header Perfox sends is trusted.
-   - Website chat: trusted only after OTP (section 5). Until then the booking tools return
+   - Website chat: trusted only after OTP in the chat or a login on the test website
+     (section 5). Until then the booking tools return
      `verification_needed`. `TRUST_WEB_PHONE=true` skips this for development only.
    - `send_otp` is the only tool that takes a typed number. It only sends a code to that
      number and returns no booking data.
@@ -179,6 +233,9 @@ for DriveBot to use.
 | File | What it does |
 |---|---|
 | `app/server.py` | FastAPI app: `/mcp` (JSON-RPC) and `/health`, API-key check |
+| `app/website.py` | The test website: serves `web/`, and the login and pickups API |
+| `app/browser_sessions.py` | Website sessions (cookie, chat token, 8-hour expiry) |
+| `web/index.html` | The test page: log in, your pickups, the Perfox chat |
 | `app/tools.py` | The four tools, their descriptions, and the SOP wording |
 | `app/otp.py` | OTP rules: making, hashing and checking codes, and the limits |
 | `app/sms.py` | Sending the SMS (mock or Plivo) |
@@ -213,9 +270,11 @@ These are guesses in the code today. Each one is easy to change when the answer 
 
 - Sessions (per Perfox conversation) are kept in memory, so restarting the server clears
   them. That's fine for the pilot. The OTP data and `verified_mobile` are kept there, so a
-  restart means website customers verify again.
+  restart means website customers verify again. Website logins are in memory too, so a
+  restart signs everyone out of the test website.
 - The server is built with FastAPI and runs on uvicorn, which is production-grade.
-  While the server is running, FastAPI's automatic API page is at http://127.0.0.1:8000/docs.
+  FastAPI's automatic API page is at http://127.0.0.1:8000/docs, but only when
+  `ENABLE_DOCS=true` in `.env`. It is off by default, because the server is public on Render.
 - Run only **one** uvicorn worker process. Sessions and the cached DriveCarClub token live
   in memory, so several worker processes would each keep their own copy.
 - The tests use FastAPI's `TestClient`, which needs the dev-only package `httpx2`.
