@@ -1,228 +1,272 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DriveBot test page · DriveCarClub pilot</title>
+<meta charset="UTF-8">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="robots" content="noindex, nofollow">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<title>DriveCarClub — Chauffeur-Driven Corporate Car Rental</title>
 <style>
-  :root {
-    --ink: #14213d;
-    --ink-soft: #2b3a5c;
-    --paper: #eef1f4;
-    --card: #ffffff;
-    --brass: #a8834f;
-    --slate: #5b6676;
-    --line: #d5dbe3;
-    --ok: #1f7a55;
-    --head: "Sora", "Segoe UI", system-ui, sans-serif;
-    --body: "Source Sans 3", "Segoe UI", system-ui, sans-serif;
-  }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; }
-  body {
-    background: var(--paper);
-    color: var(--ink);
-    font: 400 1.0625rem/1.6 var(--body);
-  }
-  a { color: var(--ink); }
-  :focus-visible { outline: 3px solid var(--brass); outline-offset: 2px; }
+  /* ---- The DriveCarClub testbed design (copied as-is) ---- */
+  :root{--ink:#0b0f16;--ink-2:#141a24;--paper:#fff;--mist:#f4f6f9;--line:#e5e9f0;--muted:#5a6675;--blue:#1e56d6;--blue-dark:#163f9e;--gold:#c8a24a;--radius:14px;--shadow:0 10px 30px #0b0f1614;--wrap:1160px}
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{color:var(--ink);background:var(--paper);-webkit-font-smoothing:antialiased;font-family:Inter,system-ui,sans-serif;line-height:1.55}
+  h1,h2,h3,.brand{letter-spacing:-.01em;font-family:Archivo,Inter,sans-serif}
+  a{color:inherit;text-decoration:none}
+  img{max-width:100%;display:block}
+  .wrap{max-width:var(--wrap);margin:0 auto;padding:0 24px}
+  .eyebrow{letter-spacing:.14em;text-transform:uppercase;color:var(--blue);font-size:12px;font-weight:600}
+  .btn{cursor:pointer;border:1px solid #0000;border-radius:10px;align-items:center;gap:8px;padding:12px 22px;font-size:15px;font-weight:600;transition:transform 60ms,background .2s;display:inline-flex}
+  .btn:active{transform:translateY(1px)}
+  .btn-primary{background:var(--blue);color:#fff}
+  .btn-primary:hover{background:var(--blue-dark)}
+  .btn-ghost{color:#fff;background:0 0;border-color:#ffffff59}
+  .btn-ghost:hover{background:#ffffff14}
+  .btn-outline{border-color:var(--line);color:var(--ink);background:#fff}
+  .btn-outline:hover{border-color:var(--blue);color:var(--blue)}
+  .nav{z-index:40;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);color:#fff;background:#0b0f16eb;border-bottom:1px solid #ffffff14;position:sticky;top:0}
+  .nav-inner{justify-content:space-between;align-items:center;height:68px;display:flex}
+  .brand{color:#fff;align-items:center;gap:10px;font-size:20px;font-weight:800;display:flex}
+  .brand .mark{background:linear-gradient(135deg, var(--blue), var(--blue-dark));color:#fff;border-radius:8px;place-items:center;width:30px;height:30px;font-size:15px;font-weight:800;display:grid}
+  .brand b{color:var(--gold);font-weight:800}
+  .nav-links{align-items:center;gap:28px;display:flex}
+  .nav-links a{color:#ffffffd1;font-size:14px;font-weight:500}
+  .nav-links a:hover{color:#fff}
+  .hero{background:radial-gradient(1100px 500px at 78% -10%, #1e56d659, transparent 60%), linear-gradient(180deg, var(--ink) 0%, var(--ink-2) 100%);color:#fff;padding:96px 0 120px}
+  .hero h1{margin:18px 0;font-size:clamp(34px,5vw,56px);font-weight:800;line-height:1.05}
+  .hero p.lede{color:#ffffffc7;max-width:560px;margin:0 0 32px;font-size:19px}
+  .hero-cta{flex-wrap:wrap;gap:14px;display:flex}
+  .hero-stats{flex-wrap:wrap;gap:40px;margin-top:56px;display:flex}
+  .hero-stats .stat b{font-family:Archivo;font-size:30px;display:block}
+  .hero-stats .stat span{color:#fff9;font-size:13px}
+  .book-card{color:var(--ink);border-radius:var(--radius);box-shadow:var(--shadow);background:#fff;max-width:460px;margin-top:40px;padding:22px}
+  .book-tabs{background:var(--mist);border-radius:10px;gap:6px;margin-bottom:18px;padding:5px;display:flex}
+  .book-tabs button{cursor:pointer;color:var(--muted);background:0 0;border:0;border-radius:7px;flex:1;padding:9px;font-size:13px;font-weight:600}
+  .book-tabs button.active{color:var(--ink);background:#fff;box-shadow:0 1px 4px #00000014}
+  .book-field{border:1px solid var(--line);color:var(--muted);border-radius:10px;margin-bottom:10px;padding:11px 13px;font-size:14px}
+  section.block{padding:84px 0}
+  section.block.tint{background:var(--mist)}
+  .section-head{max-width:640px;margin-bottom:44px}
+  .section-head h2{margin:10px 0 12px;font-size:clamp(26px,3.4vw,38px)}
+  .section-head p{color:var(--muted);margin:0;font-size:17px}
+  .grid{gap:20px;display:grid}
+  .grid-3{grid-template-columns:repeat(3,1fr)}
+  .grid-2{grid-template-columns:repeat(2,1fr)}
+  @media (width<=860px){.grid-3,.grid-2{grid-template-columns:1fr}.nav-links{display:none}}
+  .card{border:1px solid var(--line);border-radius:var(--radius);background:#fff;padding:26px;transition:box-shadow .2s,transform .2s}
+  .card:hover{box-shadow:var(--shadow);transform:translateY(-2px)}
+  .card .ic{width:44px;height:44px;color:var(--blue);background:#1e56d61a;border-radius:10px;place-items:center;margin-bottom:16px;font-size:20px;display:grid}
+  .card h3{margin:0 0 8px;font-size:19px}
+  .card p{color:var(--muted);margin:0;font-size:15px}
+  .tier{border-radius:var(--radius);color:#fff;padding:26px;position:relative;overflow:hidden}
+  .tier.standard{background:linear-gradient(160deg,#2a3646,#1b232f)}
+  .tier.premium{background:linear-gradient(160deg, var(--blue-dark), #0f2a6b)}
+  .tier.luxury{background:linear-gradient(160deg,#2a2418,#14100a);border:1px solid #c8a24a66}
+  .tier h3{margin:0 0 6px;font-size:20px}
+  .tier.luxury h3{color:var(--gold)}
+  .tier .cars{color:#ffffffb8;margin-top:10px;font-size:14px}
+  .band{background:var(--ink);color:#fff;padding:72px 0}
+  .band .grid-2{align-items:center;gap:48px}
+  .band h2{margin:0 0 14px;font-size:clamp(26px,3.4vw,36px)}
+  .band p{color:#ffffffbf;font-size:17px}
+  .footer{background:var(--ink-2);color:#ffffffb3;padding:48px 0 32px;font-size:14px}
+  .footer .cols{flex-wrap:wrap;justify-content:space-between;gap:32px;margin-bottom:32px;display:flex}
+  .footer h4{color:#fff;margin:0 0 12px;font-size:14px}
+  .footer a{color:#ffffffb3;padding:4px 0;display:block}
+  .footer a:hover{color:#fff}
+  .footer .legal{color:#ffffff80;border-top:1px solid #ffffff1a;padding-top:20px;font-size:13px}
 
-  .notice {
-    background: var(--ink);
-    color: #fff;
-    font-size: .9375rem;
-    padding: .6rem 1.25rem;
-    text-align: center;
-  }
-  .notice strong { color: #e8cfa6; font-weight: 600; }
+  /* ---- Added: login in the nav ---- */
+  :focus-visible{outline:3px solid #8fb0ff;outline-offset:2px}
+  .nav-actions{display:flex;align-items:center;gap:12px}
+  .nav-actions .who{color:#ffffffd1;font-size:14px;white-space:nowrap}
+  .nav-actions .who b{color:#fff;letter-spacing:.06em}
+  .btn[disabled]{opacity:.6;cursor:wait}
+  .btn[hidden],.nav-actions .who[hidden]{display:none}
+  @media (width<=560px){.nav-book{display:none}.wrap{padding:0 16px}}
 
-  .wrap { max-width: 68rem; margin: 0 auto; padding: 0 1.25rem; }
+  /* ---- Added: "Your pickups" (shown when signed in) ---- */
+  .pickup-list{list-style:none;margin:0;padding:0}
+  .pickup-card .ref{color:var(--muted);font-size:13px;font-weight:600;letter-spacing:.04em}
+  .pickup-card h3{margin:6px 0 14px}
+  .pickup-card dl{display:grid;grid-template-columns:1fr 1fr;gap:12px 20px;margin:0}
+  .pickup-card dt{color:var(--muted);font-size:13px}
+  .pickup-card dd{margin:2px 0 0;font-weight:600}
+  .pickup-card .plate{grid-column:1 / -1;border-top:1px dashed var(--line);padding-top:14px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+  .pickup-card .reg{font-family:Archivo,Inter,sans-serif;font-weight:800;letter-spacing:.06em;border:2px solid var(--ink);border-radius:6px;padding:2px 10px}
+  .pickup-card .status{color:#1f7a55;font-weight:600}
+  .pickups-status{color:var(--muted);margin:0 0 20px}
 
-  header.site {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 1.4rem 0;
-  }
-  .brand { font: 700 1.25rem/1 var(--head); letter-spacing: -.01em; }
-  .brand span { color: var(--brass); }
-  .site small { color: var(--slate); font-size: .9375rem; }
-
-  /* Hero: the pickup slip is the one memorable element */
-  .hero {
-    display: grid; gap: 3rem; align-items: center;
-    grid-template-columns: 1.1fr .9fr;
-    padding: 3rem 0 4rem;
-  }
-  .hero h1 {
-    font: 700 clamp(2.2rem, 5vw, 3.6rem)/1.08 var(--head);
-    letter-spacing: -.025em;
-    margin: 0 0 1.25rem;
-    max-width: 14ch;
-  }
-  .hero p { color: var(--ink-soft); max-width: 34rem; margin: 0 0 1.5rem; font-size: 1.15rem; }
-  .hint {
-    display: inline-flex; gap: .6rem; align-items: center;
-    background: var(--card); border: 1px solid var(--line);
-    border-radius: 999px; padding: .55rem 1rem; font-size: .975rem;
-  }
-  .dot { width: .6rem; height: .6rem; border-radius: 50%; background: var(--ok); }
-
-  .slip {
-    background: var(--card);
-    border-radius: 18px;
-    box-shadow: 0 1px 0 var(--line), 0 24px 48px -28px rgba(20, 33, 61, .45);
-    overflow: hidden;
-    transform: rotate(-1.5deg);
-  }
-  .slip-top { background: var(--ink); color: #fff; padding: 1.1rem 1.4rem; display: flex; justify-content: space-between; align-items: baseline; }
-  .slip-top b { font: 600 1rem var(--head); }
-  .slip-top span { color: #c9d2e3; font-size: .9rem; }
-  .slip-body { padding: 1.4rem; display: grid; grid-template-columns: 1fr 1fr; gap: 1.1rem 1.5rem; }
-  .slip-body dt { color: var(--slate); font-size: .875rem; }
-  .slip-body dd { margin: .1rem 0 0; font: 600 1.15rem/1.3 var(--head); }
-  .plate {
-    grid-column: 1 / -1;
-    border-top: 2px dashed var(--line);
-    padding-top: 1.1rem;
-    display: flex; justify-content: space-between; align-items: center;
-  }
-  .plate .reg {
-    font: 700 1.3rem var(--head); letter-spacing: .06em;
-    border: 2px solid var(--ink); border-radius: 6px; padding: .2rem .7rem;
-  }
-  .plate .status { color: var(--ok); font-weight: 600; }
-
-  /* Testing guide */
-  section.guide { padding: 3.5rem 0 5rem; border-top: 1px solid var(--line); }
-  .guide h2 { font: 600 1.75rem/1.2 var(--head); letter-spacing: -.015em; margin: 0 0 .5rem; }
-  .guide > .wrap > p { color: var(--ink-soft); margin: 0 0 2rem; max-width: 40rem; }
-  .cols { display: grid; grid-template-columns: .9fr 1.1fr; gap: 2.5rem; align-items: start; }
-  ol.steps { margin: 0; padding-left: 1.3rem; }
-  ol.steps li { margin-bottom: .9rem; padding-left: .3rem; }
-  code {
-    font-family: ui-monospace, Consolas, monospace; font-size: .95em;
-    background: #e3e8ee; padding: .05rem .35rem; border-radius: 4px;
-  }
-  .table-scroll { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
-  table { border-collapse: collapse; width: 100%; min-width: 30rem; font-size: .975rem; }
-  th, td { text-align: left; padding: .7rem 1rem; border-bottom: 1px solid var(--line); vertical-align: top; }
-  th { font: 600 .9rem var(--head); color: var(--slate); background: #f6f8fa; }
-  tr:last-child td { border-bottom: 0; }
-  td:first-child { white-space: nowrap; font-family: ui-monospace, Consolas, monospace; }
-
-  footer { color: var(--slate); font-size: .9rem; padding: 0 0 6rem; }
-
-  /* Log in / signed in, in the header */
-  .site-left { display: flex; flex-direction: column; gap: .3rem; }
-  .auth { display: flex; align-items: center; gap: .75rem; flex-wrap: wrap; justify-content: flex-end; }
-  .auth .who { color: var(--ink-soft); font-size: .975rem; }
-  .auth .who b { font-family: var(--head); font-weight: 600; letter-spacing: .04em; }
-  .btn {
-    font: 600 .95rem/1 var(--head); cursor: pointer;
-    border-radius: 999px; padding: .7rem 1.15rem; min-height: 2.75rem;
-    border: 2px solid var(--ink); background: var(--ink); color: #fff;
-  }
-  .btn:hover { background: var(--ink-soft); border-color: var(--ink-soft); }
-  .btn.ghost { background: transparent; color: var(--ink); }
-  .btn.ghost:hover { background: #e3e8ee; }
-  .btn.link { border: 0; background: none; color: var(--ink); text-decoration: underline; padding: .4rem 0; min-height: 0; }
-  .btn[disabled] { opacity: .6; cursor: wait; }
-
-  /* Your pickups */
-  section.pickups { padding: 0 0 3.5rem; }
-  .pickups h2 { font: 600 1.5rem/1.2 var(--head); letter-spacing: -.015em; margin: 0 0 1rem; }
-  .pickup-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 1.25rem; grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr)); }
-  .pickup-list .slip { transform: none; animation: none; }
-  .pickups .status-msg { color: var(--ink-soft); margin: 0; }
-
-  /* Login dialog */
-  dialog.login {
-    border: 0; border-radius: 18px; padding: 0; width: min(26rem, calc(100vw - 2rem));
-    color: var(--ink); background: var(--card);
-    box-shadow: 0 24px 64px -24px rgba(20, 33, 61, .55);
-  }
-  dialog.login::backdrop { background: rgba(20, 33, 61, .45); }
-  .login-top { background: var(--ink); color: #fff; padding: 1.1rem 1.4rem; display: flex; justify-content: space-between; align-items: center; }
-  .login-top h2 { font: 600 1.15rem var(--head); margin: 0; }
-  .login-top .close { background: none; border: 0; color: #fff; font-size: 1.6rem; line-height: 1; cursor: pointer; padding: .2rem .5rem; border-radius: 6px; }
-  .login form { padding: 1.4rem; display: grid; gap: .9rem; }
-  .login form[hidden] { display: none; }
-  .login label { font-weight: 600; }
-  .login .help { color: var(--slate); font-size: .925rem; margin: -.5rem 0 0; }
-  .login input {
-    font: 600 1.15rem var(--head); letter-spacing: .04em;
-    padding: .7rem .85rem; border: 2px solid var(--line); border-radius: 10px; width: 100%;
-    color: var(--ink); background: #fff;
-  }
-  .login input:focus-visible { border-color: var(--brass); outline: none; }
-  .login input[aria-invalid="true"] { border-color: #b3261e; }
-  .login .error { color: #b3261e; font-weight: 600; margin: 0; }
-  .login .error:empty { display: none; }
-  .login .row { display: flex; gap: 1rem; justify-content: space-between; align-items: center; flex-wrap: wrap; }
-
-  @media (max-width: 820px) {
-    .hero, .cols { grid-template-columns: 1fr; }
-    .hero { padding-top: 1.5rem; gap: 2.5rem; }
-    .slip { transform: none; }
-  }
-  @media (prefers-reduced-motion: no-preference) {
-    .slip { animation: settle .7s ease-out both; }
-    @keyframes settle { from { opacity: 0; transform: rotate(-4deg) translateY(12px); } }
-  }
+  /* ---- Added: login dialog ---- */
+  dialog.login{border:0;border-radius:var(--radius);padding:0;width:min(420px,calc(100vw - 32px));color:var(--ink);background:#fff;box-shadow:0 24px 64px -24px #0b0f168c}
+  dialog.login::backdrop{background:#0b0f1699}
+  .login-top{background:var(--ink);color:#fff;padding:18px 22px;display:flex;justify-content:space-between;align-items:center}
+  .login-top h2{font-size:18px;margin:0}
+  .login-top .close{background:none;border:0;color:#fff;font-size:26px;line-height:1;cursor:pointer;padding:2px 8px;border-radius:6px}
+  .login form{padding:22px;display:grid;gap:12px}
+  .login form[hidden]{display:none}
+  .login label{font-weight:600;font-size:14px}
+  .login .help{color:var(--muted);font-size:13px;margin:-6px 0 0}
+  .login input{font:600 17px Inter,system-ui,sans-serif;letter-spacing:.04em;padding:11px 13px;border:1px solid var(--line);border-radius:10px;width:100%;color:var(--ink);background:#fff}
+  .login input:focus-visible{border-color:var(--blue);outline:2px solid #1e56d633;outline-offset:0}
+  .login input[aria-invalid="true"]{border-color:#b3261e}
+  .login .error{color:#b3261e;font-weight:600;font-size:14px;margin:0}
+  .login .error:empty{display:none}
+  .login .btn-primary{justify-content:center}
+  .login .row{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .login .link{background:none;border:0;padding:4px 0;color:var(--blue);font:600 14px Inter,system-ui,sans-serif;cursor:pointer;text-decoration:underline}
+  .login code{background:var(--mist);padding:1px 6px;border-radius:4px}
 </style>
 </head>
 <body>
 
-<div class="notice" role="note">
-  <strong>Test page.</strong> This is a pilot test site for DriveBot, not the official DriveCarClub website. All bookings shown are fake.
-</div>
-
-<div class="wrap">
-  <header class="site">
-    <div class="site-left">
-      <div class="brand">DriveCar<span>Club</span></div>
-      <small>Corporate cars and chauffeurs</small>
+<nav class="nav">
+  <div class="wrap nav-inner">
+    <a href="/" class="brand"><span class="mark">DC</span>Drive<b>CarClub</b></a>
+    <div class="nav-links">
+      <a href="#services">Services</a>
+      <a href="#fleet">Fleet</a>
+      <a href="#corporate">Corporate</a>
+      <a href="#contact">Contact</a>
     </div>
-
-    <!-- Filled in by the script at the bottom: "Log in", or "Signed in as ••••0001" + "Log out" -->
-    <div class="auth">
-      <button type="button" class="btn" id="login-open">Log in</button>
+    <!-- Added: "Log in", or "Signed in as ••••0001" + "Log out" (filled in by the script) -->
+    <div class="nav-actions">
+      <button type="button" class="btn btn-ghost" id="login-open">Log in</button>
       <span class="who" id="signed-in-as" hidden>Signed in as <b id="masked-mobile"></b></span>
-      <button type="button" class="btn ghost" id="logout" hidden>Log out</button>
+      <button type="button" class="btn btn-ghost" id="logout" hidden>Log out</button>
+      <a class="btn btn-primary nav-book" href="#book">Book a Car</a>
     </div>
-  </header>
+  </div>
+</nav>
 
-  <main class="hero">
+<header class="hero" id="book">
+  <div class="wrap grid grid-2" style="align-items:center;gap:56px">
     <div>
-      <h1>Your car, your chauffeur, one message away.</h1>
-      <p>Ask DriveBot whether your car has been sent and who is driving it. It answers any time, in your language.</p>
-      <div class="hint"><span class="dot" aria-hidden="true"></span>Open the chat in the corner to start</div>
+      <span class="eyebrow" style="color:#8fb0ff">Chauffeur-driven · No self-drive</span>
+      <h1>Corporate-grade travel, on the clock.</h1>
+      <p class="lede">Premium chauffeur-driven cars for 800+ corporate houses across India. Book, dispatch and track — with 100% reliability on service delivery.</p>
+      <div class="hero-cta">
+        <a class="btn btn-primary" href="#services">Book a Car</a>
+        <a class="btn btn-ghost" href="#corporate">Corporate Solutions</a>
+      </div>
+      <div class="hero-stats">
+        <div class="stat"><b>112+</b><span>Cities in India</span></div>
+        <div class="stat"><b>3,500+</b><span>Cars in fleet</span></div>
+        <div class="stat"><b>24/7</b><span>Reservations</span></div>
+      </div>
     </div>
+    <div class="book-card">
+      <div class="book-tabs" id="book-tabs">
+        <button type="button" class="active">Airport</button>
+        <button type="button">Local</button>
+        <button type="button">Outstation</button>
+      </div>
+      <div class="book-field" id="book-pickup">Pickup — Airport terminal</div>
+      <div class="book-field" id="book-drop">Drop location</div>
+      <div class="book-field">Date &amp; time · Car class</div>
+      <button type="button" class="btn btn-primary" style="width:100%;justify-content:center">Check availability</button>
+      <p style="font-size:13px;color:var(--muted);margin:12px 0 0;text-align:center">Or ask the DriveCarClub concierge — bottom-right — to dispatch for you.</p>
+    </div>
+  </div>
+</header>
 
-    <aside class="slip" aria-label="Example of the details DriveBot shares">
-      <div class="slip-top"><b>Pickup today</b><span>Example</span></div>
-      <dl class="slip-body">
-        <div><dt>Time</dt><dd>6:30 PM</dd></div>
-        <div><dt>Area</dt><dd>Koramangala</dd></div>
-        <div><dt>Chauffeur</dt><dd>Ramesh</dd></div>
-        <div><dt>Car</dt><dd>White Innova Crysta</dd></div>
-        <div class="plate"><span class="reg">KA 01 AB 1234</span><span class="status">Car sent</span></div>
-      </dl>
-    </aside>
-  </main>
+<!-- Added: shown only when signed in -->
+<section class="block tint" id="pickups" aria-labelledby="pickups-title" hidden>
+  <div class="wrap">
+    <div class="section-head" style="margin-bottom:24px">
+      <span class="eyebrow">Your account</span>
+      <h2 id="pickups-title">Your pickups</h2>
+    </div>
+    <p class="pickups-status" id="pickups-status" role="status"></p>
+    <ul class="grid grid-3 pickup-list" id="pickup-list"></ul>
+  </div>
+</section>
 
-  <!-- Shown only when signed in -->
-  <section class="pickups" id="pickups" aria-labelledby="pickups-title" hidden>
-    <h2 id="pickups-title">Your pickups</h2>
-    <p class="status-msg" id="pickups-status" role="status"></p>
-    <ul class="pickup-list" id="pickup-list"></ul>
-  </section>
-</div>
+<section class="block" id="services">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">What we run</span>
+      <h2>Every corporate journey, covered</h2>
+      <p>From a single airport pickup to a full monthly roster — one account, one point of contact.</p>
+    </div>
+    <div class="grid grid-3">
+      <div class="card"><div class="ic">✈</div><h3>Airport Transfers</h3><p>Meet-and-greet pickups and drops with flight tracking and buffer for delays.</p></div>
+      <div class="card"><div class="ic">🏙</div><h3>Local — Half / Full Day</h3><p>4hr/40km and 8hr/80km city packages with a dedicated chauffeur on call.</p></div>
+      <div class="card"><div class="ic">🛣</div><h3>Outstation &amp; Inter-city</h3><p>One-way and round trips across 112+ cities, billed transparently by the km.</p></div>
+      <div class="card"><div class="ic">📅</div><h3>Monthly Hiring</h3><p>Cars and chauffeurs assigned to your team on rolling monthly contracts.</p></div>
+      <div class="card"><div class="ic">👔</div><h3>Corporate Staff Transport</h3><p>Rostered employee pickups and event fleets, managed centrally.</p></div>
+      <div class="card"><div class="ic">🧭</div><h3>Holiday &amp; Pilgrimage</h3><p>Multi-day packages to tourist and pilgrimage destinations with trip planning.</p></div>
+    </div>
+  </div>
+</section>
 
-<!-- Login: step 1 asks for the mobile number, step 2 for the 6-digit code -->
+<section class="block tint" id="fleet">
+  <div class="wrap">
+    <div class="section-head">
+      <span class="eyebrow">The fleet</span>
+      <h2>From everyday to super-luxury</h2>
+      <p>Professionally trained chauffeurs across every tier, tracked live on the DriveCarClub app.</p>
+    </div>
+    <div class="grid grid-3">
+      <div class="tier standard"><h3>Standard</h3><div style="font-size:13px;opacity:.8">Everyday corporate travel</div><div class="cars">Swift Dzire · Honda City · Toyota Etios</div></div>
+      <div class="tier premium"><h3>Premium</h3><div style="font-size:13px;opacity:.8">Executive &amp; client movement</div><div class="cars">BMW 3 &amp; 5 Series · Mercedes C &amp; E Class</div></div>
+      <div class="tier luxury"><h3>Luxury &amp; Group</h3><div style="font-size:13px;opacity:.8">VIP, delegations &amp; events</div><div class="cars">Innova Crysta · VW Crafter · Mercedes Viano</div></div>
+    </div>
+  </div>
+</section>
+
+<section class="band" id="corporate">
+  <div class="wrap grid grid-2">
+    <div>
+      <span class="eyebrow" style="color:#8fb0ff">For corporates</span>
+      <h2>One account. Every city. Full visibility.</h2>
+      <p>Centralised billing, GST-compliant invoicing, duty logs and a dedicated relationship desk — trusted by 800+ corporate houses and leading hotels.</p>
+      <div style="margin-top:24px"><a class="btn btn-primary" href="#contact">Talk to corporate sales</a></div>
+    </div>
+    <div class="grid" style="grid-template-columns:1fr 1fr;gap:16px">
+      <div class="card" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);color:#fff"><b style="font-family:Archivo;font-size:30px;display:block">800+</b><span style="color:rgba(255,255,255,0.65);font-size:14px">Corporate clients</span></div>
+      <div class="card" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);color:#fff"><b style="font-family:Archivo;font-size:30px;display:block">100%</b><span style="color:rgba(255,255,255,0.65);font-size:14px">Reliability on delivery</span></div>
+      <div class="card" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);color:#fff"><b style="font-family:Archivo;font-size:30px;display:block">89</b><span style="color:rgba(255,255,255,0.65);font-size:14px">Countries via Tristar</span></div>
+      <div class="card" style="background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.12);color:#fff"><b style="font-family:Archivo;font-size:30px;display:block">150</b><span style="color:rgba(255,255,255,0.65);font-size:14px">Operating locations</span></div>
+    </div>
+  </div>
+</section>
+
+<footer class="footer" id="contact">
+  <div class="wrap">
+    <div class="cols">
+      <div style="max-width:300px">
+        <div class="brand" style="margin-bottom:12px"><span class="mark">DC</span><span style="color:#fff">Drive<b style="color:var(--gold)">CarClub</b></span></div>
+        <p style="margin:0">Chauffeur-driven corporate car rental across 112+ Indian cities. Reliability, on the clock.</p>
+      </div>
+      <div>
+        <h4>Services</h4>
+        <a href="#services">Airport Transfers</a>
+        <a href="#services">Local (Half / Full Day)</a>
+        <a href="#services">Outstation &amp; Inter-city</a>
+        <a href="#services">Monthly Hiring</a>
+      </div>
+      <div>
+        <h4>Company</h4>
+        <a href="#corporate">Corporate Solutions</a>
+        <a href="#fleet">Our Fleet</a>
+        <a href="#contact">Contact</a>
+      </div>
+      <div>
+        <h4>24/7 Reservations</h4>
+        <a href="tel:+911800000000">1800-DRIVE-CC</a>
+        <a href="mailto:corporate@drivecarclub.com">corporate@drivecarclub.com</a>
+      </div>
+    </div>
+    <div class="legal">© <span id="year">2026</span> DriveCarClub — demo testbed. Not the official site.</div>
+  </div>
+</footer>
+
+<!-- Added: login. Step 1 asks for the mobile number, step 2 for the 6-digit code. -->
 <dialog class="login" id="login-dialog" aria-labelledby="login-title">
   <div class="login-top">
     <h2 id="login-title">Log in</h2>
@@ -235,7 +279,7 @@
     <input id="mobile-input" name="mobile" type="tel" inputmode="numeric" autocomplete="tel"
            placeholder="98765 43210" aria-describedby="mobile-help mobile-error" required>
     <p class="error" id="mobile-error" role="alert"></p>
-    <button type="submit" class="btn">Send code</button>
+    <button type="submit" class="btn btn-primary">Send code</button>
   </form>
 
   <form id="code-form" novalidate hidden>
@@ -244,58 +288,21 @@
     <input id="code-input" name="code" type="text" inputmode="numeric" autocomplete="one-time-code"
            maxlength="7" placeholder="123456" aria-describedby="code-help code-error" required>
     <p class="error" id="code-error" role="alert"></p>
-    <button type="submit" class="btn">Log in</button>
+    <button type="submit" class="btn btn-primary">Log in</button>
     <div class="row">
-      <button type="button" class="btn link" id="change-number">Use a different number</button>
-      <button type="button" class="btn link" id="resend-code">Send a new code</button>
+      <button type="button" class="link" id="change-number">Use a different number</button>
+      <button type="button" class="link" id="resend-code">Send a new code</button>
     </div>
   </form>
 </dialog>
 
-<section class="guide" aria-labelledby="guide-title">
-  <div class="wrap">
-    <h2 id="guide-title">How to test DriveBot</h2>
-    <p>DriveBot is connected to test data, so you can try every situation safely. The website and the chat share one login: log in on either, and the other knows. The code is always <code>123456</code> in testing, and no real SMS is sent.</p>
-
-    <div class="cols">
-      <ol class="steps">
-        <li><strong>Chat first:</strong> open the chat and ask <em>"Has my car been sent?"</em> Give a test number from the table, then the code <code>123456</code>. The header here then shows you as signed in.</li>
-        <li><strong>Website first:</strong> click <em>Log in</em>, enter a test number and <code>123456</code>. Your pickups appear, and the chat answers straight away without asking for a code.</li>
-        <li>Ask follow-ups such as <em>"Who is my driver?"</em></li>
-        <li>Click <em>Log out</em>. The chat starts fresh and asks for a code again.</li>
-        <li>Log out and back in to try another number.</li>
-      </ol>
-
-      <div class="table-scroll">
-        <table>
-          <thead><tr><th>Test number</th><th>What you should see</th></tr></thead>
-          <tbody>
-            <tr><td>9000000001</td><td>One booking today in Koramangala, chauffeur Ramesh</td></tr>
-            <tr><td>9000000002</td><td>Two current bookings; DriveBot asks which one</td></tr>
-            <tr><td>9000000003</td><td>No car sent yet</td></tr>
-            <tr><td>9000000004</td><td>Booking found, chauffeur not assigned yet</td></tr>
-            <tr><td>9000000005</td><td>System down; DriveBot shares the support number</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-</section>
-
-<div class="wrap">
-  <footer>DriveBot pilot test page. Built for testing with fake data only.</footer>
-</div>
-
 <!--
   =====================================================================
-  PASTE THE PERFOX EMBED CODE BELOW THIS LINE
-
-  Where to get it: Perfox Studio, open DriveBot, click the Web Chat
-  node, open "Install", add this site's address to "Allowed origins"
-  (the Render URL, https://drivebot-dczp.onrender.com),
-  click "Generate Credentials" and copy the embed code.
-  Leave "Require HMAC identity verification" OFF for this test page,
-  and don't add an external_id: the script below does 'identify'.
+  PERFOX EMBED CODE (Perfox Studio > DriveBot > Web Chat > Install).
+  "Allowed origins" must include this site's address
+  (the Render URL, https://drivebot-dczp.onrender.com).
+  Leave "Require HMAC identity verification" OFF and don't add an
+  external_id: the script below does 'identify'.
   =====================================================================
 -->
 
@@ -505,13 +512,11 @@
       return box;
     }
 
-    var card = el("li", "slip");
-    var top = el("div", "slip-top");
-    top.appendChild(el("b", null, "Pickup " + (p.when || "")));
-    top.appendChild(el("span", null, p.booking_ref));
-    card.appendChild(top);
+    var card = el("li", "card pickup-card");
+    card.appendChild(el("div", "ref", p.booking_ref));
+    card.appendChild(el("h3", null, "Pickup " + (p.when || "")));
 
-    var body = el("dl", "slip-body");
+    var body = el("dl");
     body.appendChild(detail("Area", p.pickup_area));
     body.appendChild(detail("Status", p.dispatch_status));
     if (p.chauffeur_allocated) {
@@ -643,6 +648,20 @@
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden) refreshSession(false);
   });
+
+  // ------------------------------------------------------------------
+  // The booking card tabs (Airport / Local / Outstation), as on the site.
+  // ------------------------------------------------------------------
+  var bookTabs = $("book-tabs").querySelectorAll("button");
+  Array.prototype.forEach.call(bookTabs, function (tab) {
+    tab.addEventListener("click", function () {
+      Array.prototype.forEach.call(bookTabs, function (t) { t.classList.toggle("active", t === tab); });
+      var kind = tab.textContent;
+      $("book-pickup").textContent = "Pickup — " + (kind === "Airport" ? "Airport terminal" : "City address");
+      $("book-drop").textContent = kind === "Outstation" ? "Destination city" : "Drop location";
+    });
+  });
+  $("year").textContent = new Date().getFullYear();
 
   // First load.
   refreshSession(false);
