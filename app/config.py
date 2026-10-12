@@ -37,6 +37,12 @@ MCP_API_KEY = _text("MCP_API_KEY")
 HOST = _text("HOST", "127.0.0.1")
 PORT = int(_number("PORT", 8000))
 
+# Keep-alive: Render's free plan sleeps after 15 minutes with no outside
+# traffic, so the server calls its own PUBLIC health URL on a timer.
+# Empty = switched off (local runs and tests).
+KEEP_ALIVE_URL = _text("KEEP_ALIVE_URL")
+KEEP_ALIVE_SECONDS = _number("KEEP_ALIVE_SECONDS", 300)  # every 5 minutes
+
 # --- DriveCarClub API --------------------------------------------------
 DCC_MODE = _text("DCC_MODE", "mock").lower()  # "mock" or "live"
 DCC_TOKEN_URL = _text(

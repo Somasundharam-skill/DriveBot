@@ -8,8 +8,11 @@ Run it with:  uv run python -m app.server
 
 import hmac
 import json
+import threading
 import uuid
+from contextlib import asynccontextmanager
 
+import requests
 import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.concurrency import run_in_threadpool
@@ -20,7 +23,38 @@ from app import config, log, tools
 SERVER_INFO = {"name": "drivebot-mcp", "version": "0.1.0"}
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
 
-app = FastAPI(title="DriveBot MCP server", version=SERVER_INFO["version"])
+
+# ----------------------------------------------------------------------
+# Keep-alive (Render free plan)
+# ----------------------------------------------------------------------
+
+
+def keep_alive(stop):
+    """Call our own public health URL every KEEP_ALIVE_SECONDS until stopped.
+
+    It must be the public URL: a call to localhost never reaches Render's
+    proxy, so it does not count as traffic and the server would still sleep.
+    """
+    while not stop.wait(config.KEEP_ALIVE_SECONDS):
+        try:
+            reply = requests.get(config.KEEP_ALIVE_URL, timeout=10)
+            log.info("keep_alive", status=reply.status_code)
+        except requests.RequestException as error:
+            log.warning("keep_alive_failed", error=type(error).__name__)
+
+
+@asynccontextmanager
+async def lifespan(app):
+    stop = threading.Event()
+    if config.KEEP_ALIVE_URL:
+        # daemon=True: the thread never blocks the server from shutting down.
+        threading.Thread(target=keep_alive, args=(stop,), daemon=True).start()
+        log.info("keep_alive_started", url=config.KEEP_ALIVE_URL, every_seconds=config.KEEP_ALIVE_SECONDS)
+    yield
+    stop.set()
+
+
+app = FastAPI(title="DriveBot MCP server", version=SERVER_INFO["version"], lifespan=lifespan)
 
 
 # ----------------------------------------------------------------------
