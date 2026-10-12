@@ -307,9 +307,15 @@
     };
   })();
 </script>
-<script src="https://soma-api.perfox.ai/widget/v1/widget.js"
-        data-site="sa_site_live_0KMJZFCN6CJRMCTETBG8214KP6766JYN"
-        defer></script>
+<!--
+  The second part of the embed code is NOT pasted here on purpose:
+    <script src="https://soma-api.perfox.ai/widget/v1/widget.js"
+            data-site="sa_site_live_0KMJZFCN6CJRMCTETBG8214KP6766JYN" defer></script>
+  The script below loads it (same src and data-site) only AFTER it has
+  queued 'identify'. The widget reads the user once, when its chat starts;
+  an 'identify' that arrives later is ignored. If the embed code changes,
+  update WIDGET_SRC and WIDGET_SITE below.
+-->
 
 <!-- END OF PERFOX EMBED CODE -->
 
@@ -323,36 +329,69 @@
   - Log in on the page: the chat doesn't ask for a code.
     Log in in the chat: this page notices and shows you as signed in.
     Log out on the page: the chat needs a code again.
+
+  IMPORTANT (how the Perfox widget behaves):
+  The widget starts its chat as soon as widget.js runs, and copies the
+  user from 'identify' only at that moment. A later 'identify' with only
+  tenant_session_token does NOT reach the chat. So:
+    1. Page load: get the chat_token, queue 'identify', THEN load widget.js.
+    2. Token changes (logout): 'shutdown' + 'identify' straight after each
+       other, so the widget restarts its chat with the new token.
 */
 (function () {
   "use strict";
 
   // ------------------------------------------------------------------
-  // Talking to Perfox, even before its script has loaded.
-  // The embed code normally creates window.Perfox straight away (a small
-  // queue that remembers calls until the real script arrives). If it
-  // isn't there yet, we keep the calls here and pass them on later.
+  // Talking to Perfox: ONLY through window.Perfox from the official
+  // embed stub above. Before widget.js loads, the stub keeps our calls in
+  // window.Perfox.q; widget.js replays them in order when it starts.
   // ------------------------------------------------------------------
-  var waitingForPerfox = [];
+  var WIDGET_SRC = "https://soma-api.perfox.ai/widget/v1/widget.js";
+  var WIDGET_SITE = "sa_site_live_0KMJZFCN6CJRMCTETBG8214KP6766JYN";
 
-  function perfox() {
-    var args = Array.prototype.slice.call(arguments);
-    if (typeof window.Perfox === "function") {
-      window.Perfox.apply(window, args);
-    } else {
-      waitingForPerfox.push(args);
-    }
+  if (typeof window.Perfox !== "function") {
+    console.error("[drivebot] The Perfox embed stub is missing. It must come before this script.");
   }
 
-  var perfoxChecks = 0;
-  var perfoxTimer = setInterval(function () {
-    if (typeof window.Perfox === "function") {
-      clearInterval(perfoxTimer);
-      waitingForPerfox.splice(0).forEach(function (args) { window.Perfox.apply(window, args); });
-    } else if (++perfoxChecks > 120) {
-      clearInterval(perfoxTimer); // give up after a minute (no embed code yet)
-    }
-  }, 500);
+  function perfox() {
+    window.Perfox.apply(window, arguments);
+  }
+
+  var widgetRequested = false;
+
+  // Add widget.js to the page (once). Only called after 'identify' is queued.
+  function loadWidget() {
+    if (widgetRequested) return;
+    widgetRequested = true;
+    var script = document.createElement("script");
+    script.src = WIDGET_SRC;
+    script.setAttribute("data-site", WIDGET_SITE);
+    script.async = true;
+    document.body.appendChild(script);
+    console.debug("[drivebot] widget script loading");
+  }
+
+  // Keep the chat bubble hidden until 'identify' has been called.
+  perfox("hide");
+
+  // Give the widget the chat_token. "restart" = the token changed while the
+  // widget was already running, so its chat must restart to pick it up.
+  function identify(chatToken, restart) {
+    perfox("hide");
+    if (restart) perfox("shutdown"); // forget the old user and conversation
+    perfox("identify", { tenant_session_token: chatToken });
+    console.debug("[drivebot] identify called" + (restart ? " (chat restarted)" : ""));
+    perfox("show");
+    console.debug("[drivebot] bubble shown");
+    loadWidget();
+  }
+
+  perfox("on", "ready", function () {
+    console.debug("[drivebot] widget ready");
+    // Belt and braces: give the same token again. (On its own this can't
+    // fix a late identify: see the note at the top.)
+    if (current) perfox("identify", { tenant_session_token: current.chat_token });
+  });
 
   // ------------------------------------------------------------------
   // Page elements
@@ -393,20 +432,31 @@
   // ------------------------------------------------------------------
   var current = null; // the last /api/session answer
 
-  function refreshSession(forceIdentify) {
+  // "afterLogin": the page just logged in, so tell Perfox again (same token).
+  function refreshSession(afterLogin) {
     return getJSON("/api/session").then(function (reply) {
-      if (!reply.ok) return;
+      if (!reply.ok) throw new Error("session " + reply.status);
       var now = reply.data;
       var first = current === null;
-
-      // Tell Perfox on every page load, after a login, and whenever the token changes.
-      if (first || forceIdentify || now.chat_token !== current.chat_token) {
-        perfox("identify", { tenant_session_token: now.chat_token });
-      }
+      var tokenChanged = !first && now.chat_token !== current.chat_token;
       var changed = first || now.signed_in !== current.signed_in || now.masked_mobile !== current.masked_mobile;
       current = now;
+      console.debug("[drivebot] session loaded (signed_in: " + now.signed_in + ")");
+
+      if (first) {
+        identify(now.chat_token, false);  // before widget.js loads
+      } else if (tokenChanged) {
+        identify(now.chat_token, true);   // logged out here or in another tab
+      } else if (afterLogin) {
+        perfox("identify", { tenant_session_token: now.chat_token });
+        console.debug("[drivebot] identify called (same token)");
+      }
       if (changed) showSignedIn();
-    }).catch(function () { /* offline: try again next time */ });
+    }).catch(function () {
+      // Server not reachable (for example Render waking up). The chat stays
+      // hidden until we have a token, so try the first load again.
+      if (current === null) setTimeout(function () { refreshSession(false); }, 3000);
+    });
   }
 
   function showSignedIn() {
@@ -575,8 +625,10 @@
     logoutBtn.disabled = true;
     postJSON("/api/logout").then(function (reply) {
       if (!reply.ok) return;
-      perfox("shutdown");          // the chat forgets this user and conversation
-      return refreshSession(true); // new chat_token -> 'identify' again
+      // Get the NEW chat_token first. refreshSession then calls 'shutdown'
+      // and 'identify' straight after each other, so the chat restarts with
+      // the new token (a 'shutdown' on its own would restart it with none).
+      return refreshSession(false);
     }).catch(function () { /* offline: stay as we are */ }).then(function () {
       logoutBtn.disabled = false;
       if (!loginOpen.hidden) loginOpen.focus();

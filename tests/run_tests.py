@@ -20,6 +20,7 @@ os.environ["ENABLE_DOCS"] = "false"
 import base64
 import json
 import logging
+import re
 import sys
 import threading
 import time
@@ -480,6 +481,14 @@ def sid_of(browser_client):
 # The page and the API docs.
 response = browser().get("/")
 check("GET / serves the test page", response.status_code == 200 and "DriveCar" in response.text)
+page = response.text
+stub_at = page.find("w.Perfox = w.Perfox ||")
+check("page: Perfox stub comes before our script",
+      0 < stub_at < page.find("function perfox()") and page.find("function perfox()") < page.find('perfox("identify"'))
+page_without_comments = re.sub(r"<!--.*?-->", "", page, flags=re.DOTALL)
+check("page: no static widget.js tag (loaded only after identify)",
+      '<script src="https://soma-api.perfox.ai' not in page_without_comments)
+check("page: our script never assigns window.Perfox", "window.Perfox =" not in page)
 check("/mcp and /health still work", client.get("/health").json()["ok"] is True)
 check("/docs is off unless ENABLE_DOCS=true", client.get("/docs").status_code == 404)
 

@@ -195,7 +195,14 @@ websites can't post with a customer's cookie (CSRF protection).
 - In Perfox Studio > Web Chat > Install, set **Allowed origins** to the Render URL:
   `https://drivebot-dczp.onrender.com`. Otherwise the chat widget won't load on the page.
 - Leave **Require HMAC identity verification** off, and don't send `external_id`.
-- Paste the embed code at the marked spot in `web/index.html`.
+- In `web/index.html`, only the first part of the embed code (the small `window.Perfox` queue)
+  is pasted at the marked spot. The page loads `widget.js` itself, **after** it has called
+  `identify`, because the widget reads the user only once, when its chat starts. If you get new
+  embed code, update `WIDGET_SRC` and `WIDGET_SITE` in the page's script.
+- After a logout the page calls `shutdown` and then `identify` with the new token, straight
+  after each other, so the chat restarts with the new token.
+- Open the browser console with "Verbose" logs on to see `[drivebot]` lines: session loaded,
+  identify called, widget script loading, bubble shown, widget ready.
 
 ## 6. Safety rules (enforced in code, not left to the AI)
 
