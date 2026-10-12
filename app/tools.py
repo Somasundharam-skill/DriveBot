@@ -1,7 +1,8 @@
-"""The two DriveBot tools (pilot scope).
+"""The DriveBot tools (pilot scope).
 
   check_dispatch_status   SOP 5: "Has my car been sent?"
   get_chauffeur_details   SOP 6: "Who is my chauffeur, which car?"
+  send_otp, verify_otp    SOP 5 rule 1: prove the number on website chat
 
 Every tool returns a dict with:
   "outcome"  a fixed code the AI can rely on
@@ -15,8 +16,8 @@ today's and upcoming pickups only.
 
 import time
 
-from app import config, identity, log, mapper
-from app.errors import DCCUnavailable
+from app import config, identity, log, mapper, otp
+from app.errors import DCCUnavailable, SMSUnavailable
 
 # ----------------------------------------------------------------------
 # Tool definitions shown to the AI (tools/list).
@@ -31,13 +32,15 @@ TOOLS = [
             "'Is my car coming?' or about the status of their booking. Also call it first "
             "when the customer asks for chauffeur or car details and you do not have a "
             "booking_ref yet. Takes no arguments: the customer's mobile number is taken "
-            "automatically from the verified conversation, so never ask for a number or "
+            "automatically from the verified conversation, so never pass a number or "
             "look one up for someone else. Only today's and upcoming pickups are returned. "
             "The result has an 'outcome' (one, several, none, verification_needed, "
             "unavailable) and a 'say' field: tell the customer what 'say' says, in their "
             "language, and do not add or guess any details that are not in the result. "
             "If the outcome is 'several', ask which pickup they mean using only the date, "
-            "time and area, then use that booking's booking_ref."
+            "time and area, then use that booking's booking_ref. If the outcome is "
+            "'verification_needed' (website chat), ask for their mobile number and call "
+            "send_otp with it."
         ),
         "input_schema": {
             "type": "object",
@@ -58,7 +61,8 @@ TOOLS = [
             "not_allocated, not_found, verification_needed, unavailable) and a 'say' field: "
             "tell the customer what 'say' says, in their language. When the outcome is "
             "'shared', share exactly these details and nothing more. Never share details "
-            "of any other driver or booking."
+            "of any other driver or booking. If the outcome is 'verification_needed' "
+            "(website chat), ask for their mobile number and call send_otp with it."
         ),
         "input_schema": {
             "type": "object",
@@ -73,7 +77,61 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "send_otp",
+        "description": (
+            "Website chat only. Texts a 6-digit one-time code to the customer's mobile "
+            "number, to prove the number is theirs before any booking details are shared. "
+            "Call this ONLY after check_dispatch_status or get_chauffeur_details returned "
+            "'verification_needed' and the customer has told you their mobile number. "
+            "Never read the number back to the customer and never guess or invent one. "
+            "The result has an 'outcome' (sent, not_needed, invalid_number, "
+            "too_many_requests, locked, unavailable) and a 'say' field: tell the customer "
+            "what 'say' says, in their language. When the outcome is 'sent', wait for the "
+            "customer to tell you the code, then call verify_otp. You never see the code "
+            "yourself."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mobile_number": {
+                    "type": "string",
+                    "description": "The Indian mobile number exactly as the customer typed it "
+                    "(for example 98765 43210 or +91 98765 43210).",
+                }
+            },
+            "required": ["mobile_number"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "verify_otp",
+        "description": (
+            "Website chat only. Checks the 6-digit code the customer received by SMS after "
+            "send_otp. Call this when the customer tells you the code. The result has an "
+            "'outcome' (verified, wrong_code, expired, locked, not_needed) and a 'say' "
+            "field: tell the customer what 'say' says, in their language. When the outcome "
+            "is 'verified', call the tool the customer needed again (check_dispatch_status "
+            "or get_chauffeur_details). If 'wrong_code', ask them to check the code and try "
+            "again. If 'expired', offer to send a new code with send_otp. If 'locked', do "
+            "not try again; give the customer support number."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "The 6-digit code exactly as the customer typed it.",
+                }
+            },
+            "required": ["code"],
+            "additionalProperties": False,
+        },
+    },
 ]
+
+BOOKING_TOOLS = ("check_dispatch_status", "get_chauffeur_details")
+OTP_TOOLS = ("send_otp", "verify_otp")
 
 # ----------------------------------------------------------------------
 # Wording shared by both tools.
@@ -89,7 +147,12 @@ def _verification_needed_result():
         "outcome": "verification_needed",
         "say": (
             "For your security, I need to verify your mobile number before I can share "
-            f"booking details, and I can't do that in this chat yet. For help, {_support_line()}."
+            "booking details. Please tell me your mobile number and I'll send you a "
+            "one-time code by SMS."
+        ),
+        "next_step": (
+            "When the customer gives their mobile number, call send_otp with it. "
+            "Never read the number back to them."
         ),
     }
 
@@ -239,6 +302,112 @@ def get_chauffeur_details(mobile, booking_ref):
 
 
 # ----------------------------------------------------------------------
+# Tools 3 and 4: send_otp and verify_otp (SOP 5 rule 1, website chat)
+# The code itself is NEVER put in a result or a log line.
+# ----------------------------------------------------------------------
+
+
+def _is_web(caller):
+    return (caller.get("channel") or "").strip().lower() == "web"
+
+
+def _not_needed_result():
+    return {
+        "outcome": "not_needed",
+        "say": "Your number is already verified on this channel, so no code is needed.",
+        "next_step": "Call check_dispatch_status or get_chauffeur_details directly.",
+    }
+
+
+def _locked_result():
+    return {
+        "outcome": "locked",
+        "say": (
+            "I'm sorry, I can't verify your number in this chat because of too many wrong "
+            f"codes. For help with your booking, {_support_line()}."
+        ),
+    }
+
+
+def send_otp(caller, mobile_number):
+    """Text a code to the number the customer typed.
+
+    Returns (result, mobile) so call_tool can log the masked number.
+    """
+    if not _is_web(caller):
+        return _not_needed_result(), None
+
+    mobile = identity.normalise_phone(mobile_number)
+    if not mobile:
+        return {
+            "outcome": "invalid_number",
+            "say": "That doesn't look like an Indian mobile number. Could you check it and tell me again?",
+        }, None
+
+    session = identity.get_session(caller.get("conversation_id"))
+    outcome = otp.send_code(session, mobile)  # may raise SMSUnavailable
+
+    if outcome == "locked":
+        return _locked_result(), mobile
+    if outcome == "too_many_requests":
+        return {
+            "outcome": "too_many_requests",
+            "say": (
+                "I can't send another code just now. Please use the last code I sent, "
+                f"or wait a moment and ask again. If you still need help, {_support_line()}."
+            ),
+        }, mobile
+    return {
+        "outcome": "sent",
+        "say": (
+            "I've sent a 6-digit code by SMS to the number you gave me. "
+            "Please tell me the code. It expires in 5 minutes."
+        ),
+        "next_step": "When the customer tells you the code, call verify_otp with it.",
+    }, mobile
+
+
+def verify_otp(caller, code):
+    """Check the code the customer typed.
+
+    Returns (result, mobile) so call_tool can log the masked number.
+    """
+    if not _is_web(caller):
+        return _not_needed_result(), None
+
+    session = identity.get_session(caller.get("conversation_id"))
+    mobile = otp.pending_mobile(session)  # read before check_code clears it
+    outcome, details = otp.check_code(session, code)
+
+    if outcome == "verified":
+        return {
+            "outcome": "verified",
+            "say": "Thank you, your number is verified.",
+            "next_step": (
+                "Now call check_dispatch_status (or get_chauffeur_details) again to "
+                "answer the customer's question."
+            ),
+        }, details["mobile"]
+    if outcome == "wrong_code":
+        left = details["attempts_left"]
+        return {
+            "outcome": "wrong_code",
+            "attempts_left": left,
+            "say": (
+                f"That code doesn't match. Please check the SMS and try again. "
+                f"You have {left} {'try' if left == 1 else 'tries'} left."
+            ),
+        }, mobile
+    if outcome == "locked":
+        return _locked_result(), mobile
+    return {
+        "outcome": "expired",
+        "say": "That code has expired or there's no code waiting. Would you like me to send a new one?",
+        "next_step": "If the customer says yes, call send_otp again with their mobile number.",
+    }, mobile
+
+
+# ----------------------------------------------------------------------
 # One entry point for tools/call: identity check, run, log.
 # ----------------------------------------------------------------------
 
@@ -253,7 +422,9 @@ def call_tool(name, arguments, caller):
     "caller" holds the Perfox headers (phone, channel, conversation_id...).
     The phone number comes ONLY from there, never from "arguments".
     """
-    if name not in ("check_dispatch_status", "get_chauffeur_details"):
+    if name in OTP_TOOLS:
+        return _call_otp_tool(name, arguments, caller)
+    if name not in BOOKING_TOOLS:
         raise UnknownTool(name)
 
     started = time.monotonic()
@@ -293,6 +464,45 @@ def call_tool(name, arguments, caller):
         channel=caller.get("channel"),
         mobile=log.mask_mobile(mobile or identity.normalise_phone(caller.get("phone"))),
         booking_ref=logged_ref,
+        outcome=result["outcome"],
+        reason=result.get("reason"),
+        duration_ms=round((time.monotonic() - started) * 1000),
+    )
+    return result
+
+
+def _call_otp_tool(name, arguments, caller):
+    """Run send_otp or verify_otp, and log it WITHOUT the code."""
+    started = time.monotonic()
+    arguments = arguments or {}
+    mobile = None
+    try:
+        if name == "send_otp":
+            result, mobile = send_otp(caller, arguments.get("mobile_number"))
+        else:
+            result, mobile = verify_otp(caller, arguments.get("code"))
+    except SMSUnavailable as failure:
+        log.alert_perfox_team(
+            f"sms_{failure.reason}", tool=name, conversation_id=caller.get("conversation_id")
+        )
+        result = {
+            "outcome": "unavailable",
+            "reason": f"sms_{failure.reason}",
+            "say": f"I'm sorry, I can't send a code right now. {_support_line().capitalize()}.",
+        }
+    except Exception as crash:  # a bug in our code
+        log.alert_perfox_team(
+            "internal_error", tool=name, conversation_id=caller.get("conversation_id"),
+            error=type(crash).__name__,  # no message: it could contain the code
+        )
+        result = _unavailable_result("internal_error")
+
+    log.info(
+        "tool_call",
+        tool=name,
+        conversation_id=caller.get("conversation_id"),
+        channel=caller.get("channel"),
+        mobile=log.mask_mobile(mobile),
         outcome=result["outcome"],
         reason=result.get("reason"),
         duration_ms=round((time.monotonic() - started) * 1000),

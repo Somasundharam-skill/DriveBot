@@ -13,6 +13,8 @@ os.environ["DCC_MODE"] = "mock"
 os.environ["MCP_API_KEY"] = "test-key"
 os.environ["TRUST_WEB_PHONE"] = "false"
 os.environ["DCC_TIMEOUT_SECONDS"] = "1"
+os.environ["OTP_MODE"] = "mock"  # no SMS; the code is always 123456
+os.environ["KEEP_ALIVE_URL"] = ""  # never ping the real server from tests
 
 import base64
 import json
@@ -25,9 +27,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fastapi.testclient import TestClient
 
-from app import identity
+from app import config, identity, otp, sms
 from app.drivecarclub import DriveCarClubClient
-from app.errors import DCCUnavailable
+from app.errors import DCCUnavailable, SMSUnavailable
 from app.mapper import INDIA
 from app.server import app
 
@@ -107,7 +109,9 @@ check("initialize defaults protocolVersion to 2024-11-05",
 
 response = rpc("tools/list")
 tool_list = response.json()["result"]["tools"]
-check("tools/list returns 2 tools", len(tool_list) == 2)
+check("tools/list returns 4 tools", len(tool_list) == 4)
+check("tools/list has the OTP tools",
+      {t["name"] for t in tool_list} == {"check_dispatch_status", "get_chauffeur_details", "send_otp", "verify_otp"})
 check("tools have name, description, input_schema",
       all(t.get("name") and t.get("description") and t.get("input_schema") for t in tool_list))
 
@@ -273,7 +277,168 @@ result, text = call("get_chauffeur_details", {"booking_ref": "DCC100101"}, phone
 check("chauffeur with server error -> unavailable", result["outcome"] == "unavailable", text)
 
 # ----------------------------------------------------------------------
-# 5. Logging
+# 5. OTP on website chat (SOP 5 rule 1)
+# ----------------------------------------------------------------------
+print("\n--- OTP (website chat) ---")
+
+MOCK_CODE = config.MOCK_OTP_CODE
+otp_texts = []  # every OTP-related tool result, to check the code never appears
+log_lines.clear()
+
+
+def web(tool, arguments=None, conversation_id="otp-1", phone=None):
+    """Call a tool on website chat and remember the result text."""
+    result, text = call(tool, arguments, phone=phone, channel="web", conversation_id=conversation_id)
+    otp_texts.append(text)
+    return result, text
+
+
+def let_30_seconds_pass(conversation_id):
+    """Pretend the 30-second wait between sends is over."""
+    identity.get_session(conversation_id)["otp_last_sent_at"] -= 31
+
+
+# No OTP yet: booking tools must still refuse (TRUST_WEB_PHONE is false).
+check("TRUST_WEB_PHONE is false in the tests", config.TRUST_WEB_PHONE is False)
+result, text = web("check_dispatch_status", phone="919000000001")
+check("no OTP -> check_dispatch_status verification_needed", result["outcome"] == "verification_needed", text)
+check("verification_needed asks for the number and points to send_otp",
+      "mobile number" in result["say"] and "send_otp" in result.get("next_step", ""), text)
+result, text = web("get_chauffeur_details", {"booking_ref": "DCC100101"}, phone="919000000001")
+check("no OTP -> get_chauffeur_details verification_needed", result["outcome"] == "verification_needed", text)
+result, text = web("check_dispatch_status", conversation_id="otp-no-header")
+check("web chat with no phone header -> verification_needed", result["outcome"] == "verification_needed", text)
+
+# Happy path. The phone header says ...0003 (no bookings), but the code is
+# sent to ...0001, so ...0001 must be the verified number.
+result, text = web("send_otp", {"mobile_number": "+91 90000 00001"}, phone="919000000003")
+check("send_otp -> sent", result["outcome"] == "sent", text)
+check("sent -> asks for the 6-digit code", "6-digit code" in result["say"])
+check("sent -> does not read the number back", "90000" not in text and "0001" not in text, text)
+result, text = web("verify_otp", {"code": MOCK_CODE}, phone="919000000003")
+check("verify_otp with the mock code -> verified", result["outcome"] == "verified", text)
+check("verified -> tells the AI to call the booking tool again", "check_dispatch_status" in result.get("next_step", ""))
+check("verified number is the one the code was sent to",
+      identity.get_session("otp-1")["verified_mobile"] == "919000000001")
+result, text = web("check_dispatch_status", phone="919000000003")
+check("after OTP -> check_dispatch_status works for that number", result["outcome"] == "one", text)
+result, text = web("get_chauffeur_details", {"booking_ref": "DCC100101"}, phone="919000000003")
+check("after OTP -> get_chauffeur_details works", result["outcome"] == "shared", text)
+check("OTP data is cleared after verifying", identity.get_session("otp-1").get("otp") is None)
+
+# Spaces in the typed code are fine.
+web("send_otp", {"mobile_number": "9000000002"}, conversation_id="otp-spaces")
+result, text = web("verify_otp", {"code": "123 456"}, conversation_id="otp-spaces")
+check("code typed with a space -> verified", result["outcome"] == "verified", text)
+
+# Wrong code 3 times -> locked; the right code no longer works.
+web("send_otp", {"mobile_number": "9000000001"}, conversation_id="otp-wrong")
+result, text = web("verify_otp", {"code": "000000"}, conversation_id="otp-wrong")
+check("wrong code -> wrong_code with 2 attempts left",
+      result["outcome"] == "wrong_code" and result.get("attempts_left") == 2, text)
+result, _ = web("verify_otp", {"code": "111111"}, conversation_id="otp-wrong")
+check("second wrong code -> 1 attempt left", result.get("attempts_left") == 1)
+result, text = web("verify_otp", {"code": "222222"}, conversation_id="otp-wrong")
+check("third wrong code -> locked", result["outcome"] == "locked", text)
+check("locked -> gives the support number", "customer support" in result["say"])
+result, text = web("verify_otp", {"code": MOCK_CODE}, conversation_id="otp-wrong")
+check("correct code after locked -> still locked", result["outcome"] == "locked", text)
+check("locked conversation is not verified", identity.get_session("otp-wrong")["verified_mobile"] is None)
+let_30_seconds_pass("otp-wrong")
+result, text = web("send_otp", {"mobile_number": "9000000001"}, conversation_id="otp-wrong")
+check("send_otp after locked -> locked (no more codes)", result["outcome"] == "locked", text)
+
+# Expired code.
+web("send_otp", {"mobile_number": "9000000001"}, conversation_id="otp-expired")
+identity.get_session("otp-expired")["otp"]["expires_at"] = time.time() - 1  # 5 minutes have passed
+result, text = web("verify_otp", {"code": MOCK_CODE}, conversation_id="otp-expired")
+check("expired code -> expired", result["outcome"] == "expired", text)
+check("expired -> offers a new code", "send a new one" in result["say"])
+result, text = web("verify_otp", {"code": MOCK_CODE}, conversation_id="otp-nothing-sent")
+check("verify_otp with no code sent -> expired", result["outcome"] == "expired", text)
+
+# Send limits: 30 seconds between sends, at most 3 codes.
+result, _ = web("send_otp", {"mobile_number": "9000000001"}, conversation_id="otp-limits")
+check("1st send -> sent", result["outcome"] == "sent")
+result, text = web("send_otp", {"mobile_number": "9000000001"}, conversation_id="otp-limits")
+check("2nd send within 30 seconds -> too_many_requests", result["outcome"] == "too_many_requests", text)
+let_30_seconds_pass("otp-limits")
+result, _ = web("send_otp", {"mobile_number": "9000000001"}, conversation_id="otp-limits")
+check("2nd send after 30 seconds -> sent", result["outcome"] == "sent")
+let_30_seconds_pass("otp-limits")
+result, _ = web("send_otp", {"mobile_number": "9000000001"}, conversation_id="otp-limits")
+check("3rd send -> sent", result["outcome"] == "sent")
+let_30_seconds_pass("otp-limits")
+result, text = web("send_otp", {"mobile_number": "9000000001"}, conversation_id="otp-limits")
+check("4th send -> too_many_requests", result["outcome"] == "too_many_requests", text)
+
+# A new code replaces the old one (it's sent to the new number).
+web("send_otp", {"mobile_number": "9000000001"}, conversation_id="otp-replace")
+let_30_seconds_pass("otp-replace")
+web("send_otp", {"mobile_number": "9000000002"}, conversation_id="otp-replace")
+web("verify_otp", {"code": MOCK_CODE}, conversation_id="otp-replace")
+check("new code replaces the old one (latest number is verified)",
+      identity.get_session("otp-replace")["verified_mobile"] == "919000000002")
+
+# Other channels and bad input.
+result, text = call("send_otp", {"mobile_number": "9000000001"}, phone="919000000001", channel="whatsapp")
+check("send_otp on whatsapp -> not_needed", result["outcome"] == "not_needed", text)
+result, text = call("verify_otp", {"code": MOCK_CODE}, phone="919000000001", channel="phone")
+check("verify_otp on a phone call -> not_needed", result["outcome"] == "not_needed", text)
+result, text = web("send_otp", {"mobile_number": "12345"}, conversation_id="otp-invalid")
+check("invalid number -> invalid_number", result["outcome"] == "invalid_number", text)
+result, text = web("send_otp", {}, conversation_id="otp-invalid")
+check("missing number -> invalid_number", result["outcome"] == "invalid_number", text)
+
+# SMS failure -> unavailable + alert.
+real_send_sms = sms.send_sms
+
+
+def broken_send_sms(mobile, text):
+    raise SMSUnavailable("timeout")
+
+
+sms.send_sms = broken_send_sms
+log_lines.clear()
+result, text = web("send_otp", {"mobile_number": "9000000001"}, conversation_id="otp-sms-down")
+sms.send_sms = real_send_sms
+check("SMS failure -> unavailable", result["outcome"] == "unavailable", text)
+check("SMS failure -> alert_perfox_team logged", any("alert_perfox_team" in line for line in log_lines))
+check("SMS failure -> no code stored", identity.get_session("otp-sms-down").get("otp") is None)
+otp_log_lines = list(log_lines)
+
+# Real (random) codes, as in plivo mode: catch the SMS text instead of sending it.
+sent_sms = []
+config.OTP_MODE = "plivo"
+sms.send_sms = lambda mobile, text: sent_sms.append(text)
+log_lines.clear()
+result, text = web("send_otp", {"mobile_number": "9000000001"}, conversation_id="otp-random")
+random_code = sent_sms[0].split("code is ")[1][:6] if sent_sms else ""
+check("plivo mode -> SMS text has a random 6-digit code",
+      len(random_code) == 6 and random_code.isdigit() and sent_sms[0] == config.OTP_SMS_TEXT.format(code=random_code),
+      sent_sms)
+stored_hash = identity.get_session("otp-random")["otp"]["hash"]
+pending_otp = dict(identity.get_session("otp-random")["otp"])
+result, text = web("verify_otp", {"code": random_code}, conversation_id="otp-random")
+check("plivo mode -> the random code verifies", result["outcome"] == "verified", text)
+config.OTP_MODE = "mock"
+sms.send_sms = real_send_sms
+otp_log_lines += log_lines
+
+check("the session stores only hash, number and expiry (never the code)",
+      set(pending_otp) == {"hash", "mobile", "expires_at"} and random_code not in pending_otp["hash"],
+      pending_otp)
+check("the code never appears in any tool result",
+      all(MOCK_CODE not in t and random_code not in t for t in otp_texts))
+check("the code and its hash never appear in any log line",
+      all(MOCK_CODE not in line and random_code not in line and stored_hash not in line
+          for line in otp_log_lines))
+otp_logs = [json.loads(line) for line in otp_log_lines if '"tool_call"' in line]
+check("OTP tool logs mask the mobile",
+      otp_logs and all(entry["mobile"] in (None, "91******0001") for entry in otp_logs), otp_logs)
+
+# ----------------------------------------------------------------------
+# 6. Logging
 # ----------------------------------------------------------------------
 print("\n--- logging ---")
 
@@ -289,11 +454,12 @@ check("log masks the mobile", entry.get("mobile") == "91******0001", entry)
 check("log never has the full mobile", all("919000000001" not in line for line in log_lines))
 
 # ----------------------------------------------------------------------
-# 6. Live client against a small fake DriveCarClub server
+# 7. Live client against a small fake DriveCarClub server
 # ----------------------------------------------------------------------
 print("\n--- live client (fake DriveCarClub server) ---")
 
 counts = {"token": 0, "bookings": 0}
+plivo_requests = []
 TODAY_BOOKING = {
     "BookingId": "LIVE1", "PickupDateTime": datetime.now(INDIA).strftime("%Y-%m-%dT23:00:00"),
     "PickupArea": "MG Road", "Status": "Dispatched", "DriverName": "Test Driver",
@@ -342,6 +508,12 @@ class FakeDriveCarClub(BaseHTTPRequestHandler):
                 return self.send(401, {"error": "token expired"})  # first token is "expired"
             return self.send(200, {"Data": [TODAY_BOOKING]})
 
+        if self.path.startswith("/v1/Account/"):  # fake Plivo Message API
+            plivo_requests.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body})
+            if body.get("dst") == "+919999999500":
+                return self.send(500, {"error": "boom"})
+            return self.send(202, {"message": "message(s) queued", "message_uuid": ["x"], "api_id": "y"})
+
         if self.path == "/slow":
             time.sleep(1.5)
             return self.send(200, [])
@@ -365,7 +537,7 @@ def live_client(token_path="/token", booking_path="/bookings", timeout=2):
 def failure_reason(function):
     try:
         function()
-    except DCCUnavailable as failure:
+    except (DCCUnavailable, SMSUnavailable) as failure:
         return failure.reason
     return None
 
@@ -400,6 +572,21 @@ check("wrong credentials on Token API is a failure",
 
 text_client = live_client(token_path="/token-text")
 check("plain-string token response is accepted", text_client.get_token().startswith("tok"))
+
+# --- Plivo SMS sender against the same fake server ---
+PLIVO = {"auth_id": "MAFAKE", "auth_token": "secret-token", "sender_id": "DCCLUB", "base_url": base_url, "timeout": 2}
+sms.send_with_plivo("919876543210", "hello", **PLIVO)
+sent = plivo_requests[-1] if plivo_requests else {}
+check("plivo: posts to /v1/Account/{auth_id}/Message/", sent.get("path") == "/v1/Account/MAFAKE/Message/", sent)
+check("plivo: Basic auth with Auth ID and Auth Token",
+      sent.get("auth") == "Basic " + base64.b64encode(b"MAFAKE:secret-token").decode(), sent)
+check("plivo: body has src, dst (E.164) and text",
+      sent.get("body") == {"src": "DCCLUB", "dst": "+919876543210", "text": "hello"}, sent)
+check("plivo: 5xx is a failure",
+      failure_reason(lambda: sms.send_with_plivo("919999999500", "hi", **PLIVO)) == "http_500")
+check("plivo: missing settings is a failure",
+      failure_reason(lambda: sms.send_with_plivo("919876543210", "hi", auth_id="", auth_token="",
+                                                 sender_id="", base_url=base_url)) == "plivo_not_configured")
 
 fake_server.shutdown()
 

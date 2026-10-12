@@ -2,14 +2,16 @@
 
 DriveBot is DriveCarClub's AI customer assistant, built on Perfox. Perfox runs the
 conversation. This small server gives DriveBot the business logic and data it needs
-through two tools:
+through four tools:
 
-| Tool | SOP | What it answers |
+| Tool | SOP | What it does |
 |---|---|---|
 | `check_dispatch_status` | SOP 5 | "Has my car been sent?" |
 | `get_chauffeur_details` | SOP 6 | "Who is my chauffeur, and which car?" |
+| `send_otp` | SOP 5 rule 1 | Website chat: texts a 6-digit code to the customer's number |
+| `verify_otp` | SOP 5 rule 1 | Website chat: checks the code, then the number is trusted |
 
-Nothing else (OTP, booking, cancellation, payments) is built yet.
+Nothing else (booking, cancellation, payments) is built yet.
 
 ---
 
@@ -76,6 +78,9 @@ uv run python -m app.server
 `DCC_MODE=mock` (the default) uses fake data. `DCC_MODE=live` calls the real DriveCarClub
 API and needs `DCC_USERNAME` and `DCC_PASSWORD`.
 
+`OTP_MODE=mock` (the default) sends no SMS, and the code is always **123456**.
+`OTP_MODE=plivo` sends real SMS messages. See section 5 below.
+
 ## 4. Mock test numbers
 
 In mock mode, use these as the customer's phone number (the `X-Sa-End-User-Phone` header).
@@ -90,13 +95,63 @@ Dates are always worked out from today in India time.
 | 919000000005 | DriveCarClub server error |
 | 919000000006 | DriveCarClub does not answer in time (timeout) |
 
-## 5. Safety rules (enforced in code, not left to the AI)
+## 5. OTP on website chat
 
-1. **Trusted number only.** The customer's mobile is never a tool argument. It comes
-   only from the `X-Sa-End-User-Phone` header Perfox sends.
-   - Phone call, WhatsApp, SMS: trusted.
-   - Website chat: trusted only after an OTP check (not built yet). Until then the tool
-     returns `verification_needed`. `TRUST_WEB_PHONE=true` skips this for development only.
+On website chat anyone can type any number, so DriveBot checks that the number belongs
+to the customer before sharing booking details. Phone calls, WhatsApp and SMS don't need
+this, because there the number comes from the phone network.
+
+**How it works**
+
+1. The customer asks "Has my car been sent?". `check_dispatch_status` answers
+   `verification_needed`, and DriveBot asks for their mobile number.
+2. DriveBot calls `send_otp` with the number. The server texts a 6-digit code to it.
+3. The customer tells DriveBot the code. DriveBot calls `verify_otp`.
+4. If the code is right, the number **the code was sent to** is saved as the
+   conversation's verified number. DriveBot then calls the booking tool again.
+
+**Limits (per conversation)**
+
+| Rule | Limit | Outcome when broken |
+|---|---|---|
+| Codes sent | 3 at most | `too_many_requests` |
+| Time between sends | 30 seconds at least | `too_many_requests` |
+| How long a code works | 5 minutes | `expired` |
+| Wrong codes | 3, then no more codes in this conversation | `locked` |
+
+Sending a new code replaces the old one. These limits are in [app/config.py](app/config.py).
+
+**Testing:** with `OTP_MODE=mock`, no SMS is sent and the code is always `123456`.
+The server logs a `mock_otp_on` warning at startup as a reminder. Never use mock mode in
+production.
+
+**Settings (in `.env`)**
+
+| Setting | What it is |
+|---|---|
+| `OTP_MODE` | `mock` (default, testing only) or `plivo` (real SMS) |
+| `OTP_SECRET` | Long random secret used to hash the codes. If empty, a new random one is made at each start. |
+| `PLIVO_AUTH_ID`, `PLIVO_AUTH_TOKEN` | Your Plivo account details |
+| `PLIVO_SENDER_ID` | The sender ID or Plivo number the SMS comes from |
+| `OTP_SMS_TEXT` | The SMS text. `{code}` is replaced with the code. India needs an approved template, so make it match exactly. |
+
+**Keeping the code safe**
+
+- The code is never stored. Only a hash of it is kept (HMAC-SHA256 with `OTP_SECRET`).
+- The code and its hash are never put in a tool result or a log line. Logs show only
+  the masked mobile, the outcome and the conversation id.
+- If the SMS can't be sent, the tool answers `unavailable` and the server logs
+  `alert_perfox_team`.
+- SMS sending is in [app/sms.py](app/sms.py), so another provider can be added there later.
+
+## 6. Safety rules (enforced in code, not left to the AI)
+
+1. **Trusted number only.** The booking tools never take the mobile number as an argument.
+   - Phone call, WhatsApp, SMS: the `X-Sa-End-User-Phone` header Perfox sends is trusted.
+   - Website chat: trusted only after OTP (section 5). Until then the booking tools return
+     `verification_needed`. `TRUST_WEB_PHONE=true` skips this for development only.
+   - `send_otp` is the only tool that takes a typed number. It only sends a code to that
+     number and returns no booking data.
    - No number, or any other channel: `unavailable`.
 2. **Own bookings only.** `get_chauffeur_details` fetches the caller's bookings again and
    checks the booking reference belongs to them. If not, it says `not_found` and reveals nothing.
@@ -119,22 +174,24 @@ Dates are always worked out from today in India time.
 Every tool result has an `outcome` (a fixed code) and a `say` field with the SOP wording
 for DriveBot to use.
 
-## 6. Project layout
+## 7. Project layout
 
 | File | What it does |
 |---|---|
 | `app/server.py` | FastAPI app: `/mcp` (JSON-RPC) and `/health`, API-key check |
-| `app/tools.py` | The two tools, their descriptions, and the SOP wording |
+| `app/tools.py` | The four tools, their descriptions, and the SOP wording |
+| `app/otp.py` | OTP rules: making, hashing and checking codes, and the limits |
+| `app/sms.py` | Sending the SMS (mock or Plivo) |
 | `app/identity.py` | Trusted-number rules, phone formatting, per-conversation sessions |
 | `app/mapper.py` | `FIELD_MAP` and the field allowlists. **Update this when the real sample arrives.** |
 | `app/drivecarclub.py` | Live DriveCarClub client: token caching, one retry on 401, timeouts |
 | `app/mock.py` | Fake data for the test numbers |
 | `app/config.py` | All settings (read from `.env`) |
-| `app/log.py`, `app/errors.py` | JSON logging and the "DriveCarClub unavailable" error |
+| `app/log.py`, `app/errors.py` | JSON logging, and the "DriveCarClub unavailable" and "SMS unavailable" errors |
 | `tests/run_tests.py` | All tests |
 | `pyproject.toml`, `uv.lock` | Package list and exact locked versions (used by uv) |
 
-## 7. Still waiting on DriveCarClub IT
+## 8. Still waiting on DriveCarClub IT
 
 These are guesses in the code today. Each one is easy to change when the answer arrives.
 
@@ -150,11 +207,13 @@ These are guesses in the code today. Each one is easy to change when the answer 
 | Production URLs, credentials and rate limits | UAT URLs | `DCC_TOKEN_URL`, `DCC_BOOKING_URL` in `.env` |
 | Share the chauffeur's mobile? (SOP 6 open item 2) | No | `SHARE_CHAUFFEUR_MOBILE` in `app/config.py` |
 | Customer support number | Placeholder text | `SUPPORT_NUMBER` in `.env` |
+| Approved SMS template and sender ID for the OTP | Text from the brief | `OTP_SMS_TEXT`, `PLIVO_SENDER_ID` in `.env` |
 
-## 8. Good to know
+## 9. Good to know
 
 - Sessions (per Perfox conversation) are kept in memory, so restarting the server clears
-  them. That's fine for the pilot. The future OTP step will store `verified_mobile` there.
+  them. That's fine for the pilot. The OTP data and `verified_mobile` are kept there, so a
+  restart means website customers verify again.
 - The server is built with FastAPI and runs on uvicorn, which is production-grade.
   While the server is running, FastAPI's automatic API page is at http://127.0.0.1:8000/docs.
 - Run only **one** uvicorn worker process. Sessions and the cached DriveCarClub token live

@@ -189,6 +189,13 @@ def log_startup_warnings():
         log.warning("unknown_dcc_mode", note=f"DCC_MODE={config.DCC_MODE!r} is not mock or live; using mock.")
     if config.DCC_MODE == "live" and not (config.DCC_USERNAME and config.DCC_PASSWORD):
         log.warning("missing_dcc_credentials", note="DCC_MODE=live but DCC_USERNAME or DCC_PASSWORD is empty.")
+    if config.OTP_MODE == "plivo":
+        if not (config.PLIVO_AUTH_ID and config.PLIVO_AUTH_TOKEN and config.PLIVO_SENDER_ID):
+            log.warning("missing_plivo_settings", note="OTP_MODE=plivo but a PLIVO_* setting is empty: no code can be sent.")
+        if not config.OTP_SECRET:
+            log.warning("no_otp_secret", note="OTP_SECRET is empty: using a random secret for this run.")
+    else:
+        log.warning("mock_otp_on", note=f"OTP_MODE={config.OTP_MODE!r}: no SMS is sent and the code is always the mock code. Never use in production!")
 
 
 log_startup_warnings()
