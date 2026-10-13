@@ -1,61 +1,104 @@
 """Turns DriveCarClub's raw booking data into the few safe fields we share.
 
-We have not seen a real DespatchedBooking response yet. So FIELD_MAP lists
-the field names we THINK DriveCarClub might use. When the sample response
-arrives, update FIELD_MAP here and nothing else should need to change.
+FIELD_MAP below matches the REAL UAT DespatchedBooking response, which
+looks like this (one booking shown, private fields marked *):
+
+    {"status": "200", "message": "Success", "data": [{
+        "actual_bk_num": "BCR-XXX-0000001", "location": "New Delhi",
+        "city_Name": "Gurugram", "status": "Despatched",
+        "reportingDate": "05-08-2026", "reportingTime": "12:00",
+        "carBooked": "Swift Dzire", "carAlloted": "Swift Dzire",
+        "carNumber": "5792-DL1ZD", "chauffeurName": "FIRSTNAME LASTNAME",
+        "chaufferMobile"*, "company_Name"*, "individualsname"*,
+        "b_Guest_Contact_No"*, "reportingAddress"*, "standinginstructions"*, ...}]}
+
+Our older guessed names are kept after the real ones as fallbacks.
 
 Safety rule: only the fields built in dispatch_summary() and
-chauffeur_details() ever leave this server. Addresses, drop location,
-the chauffeur's surname and (for now) mobile are never shared.
+chauffeur_details() ever leave this server. The customer's name, company,
+guest number, address, the chauffeur's surname and (for now) mobile are
+never shared. reportingAddress is never read at all.
 """
 
 import re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from app import config
+from app import config, log
 
 INDIA = ZoneInfo(config.TIMEZONE)
 
 # For each field we need: the raw field names it might arrive under.
 # The first one that has a value wins. Matching ignores upper/lower case.
+# The REAL DriveCarClub name comes first; the rest are our old guesses.
 FIELD_MAP = {
-    "booking_ref": ["BookingId", "BookingID", "BookingNo", "BookingRef", "BookingNumber"],
+    "booking_ref": ["actual_bk_num", "BookingId", "BookingID", "BookingNo", "BookingRef", "BookingNumber"],
+    # Real API: date and time arrive separately ("05-08-2026" and "12:00").
+    "pickup_date": ["reportingDate"],
+    "pickup_time": ["reportingTime"],
+    # Old guesses: date and time in one field. Used only if reportingDate is empty.
     "pickup_datetime": ["PickupDateTime", "PickUpDateTime", "ReportingDateTime", "TripDateTime"],
-    "pickup_area": ["PickupArea", "PickUpArea", "PickupLocality", "Area"],
-    "status": ["Status", "BookingStatus", "DispatchStatus", "TripStatus"],
-    "driver_name": ["DriverName", "ChauffeurName", "Driver"],
-    "driver_mobile": ["DriverMobile", "DriverMobileNo", "DriverPhone", "ChauffeurMobile"],
-    "car_model": ["CarModel", "VehicleModel", "Model", "CarType"],
+    # Which of city_Name / location is tried first is set by PICKUP_AREA_FIELD
+    # (see area_names()). Never add reportingAddress: it is the full address.
+    "pickup_area": ["city_Name", "location", "PickupArea", "PickUpArea", "PickupLocality", "Area"],
+    "status": ["status", "BookingStatus", "DispatchStatus", "TripStatus"],
+    "driver_name": ["chauffeurName", "DriverName", "Driver"],
+    # Note DriveCarClub's spelling: "chauffer". Still hidden (SHARE_CHAUFFEUR_MOBILE).
+    "driver_mobile": ["chaufferMobile", "chauffeurMobile", "DriverMobile", "DriverMobileNo", "DriverPhone"],
+    # The car actually sent; the car booked only if none is allotted yet.
+    "car_model": ["carAlloted", "carBooked", "CarModel", "VehicleModel", "Model", "CarType"],
+    # The real API has no colour field, so this is usually empty (and then left out).
     "car_colour": ["CarColour", "CarColor", "VehicleColour", "VehicleColor", "Colour", "Color"],
-    "registration_number": ["CarNo", "CarNumber", "VehicleNo", "VehicleNumber", "RegistrationNo", "RegNo"],
+    "registration_number": ["carNumber", "CarNo", "VehicleNo", "VehicleNumber", "RegistrationNo", "RegNo"],
 }
 
 # The response may be a plain list, or a dict holding the list under one of these keys.
 LIST_KEYS = ["data", "Data", "bookings", "Bookings", "result", "Result"]
 
 # Bookings with these words in their status are finished, so we hide them.
+# Change this list if DriveCarClub uses other words for finished trips.
 FINISHED_STATUS_WORDS = ["complete", "close", "cancel"]
 
+# Statuses we show in a standard form. DriveCarClub spells it "Despatched".
+STATUS_NAMES = {"despatched": "Dispatched"}
 
-def unwrap_booking_list(response_data):
-    """Find the list of bookings in the API response.
 
+def unwrap_response_list(response_data):
+    """Find the list (bookings or rates) in a DriveCarClub API response.
+
+    The real response is {"status": "200", "message": ..., "data": [...]}.
+    A dict whose "status" is not "200" is an error.
     Returns the list, or None if the response does not look right.
     """
     if isinstance(response_data, list):
         return response_data
-    if isinstance(response_data, dict):
-        for key in LIST_KEYS:
-            if isinstance(response_data.get(key), list):
-                return response_data[key]
+    if not isinstance(response_data, dict):
+        return None
+    if str(response_data.get("status", "")).strip() != "200":
+        return None
+    for key in LIST_KEYS:
+        if isinstance(response_data.get(key), list):
+            return response_data[key]
     return None
+
+
+def area_names():
+    """The pickup area field names, with PICKUP_AREA_FIELD tried first.
+
+    DriveCarClub hasn't confirmed whether city_Name or location is the
+    right one, so it is a setting. Only those two can be chosen.
+    """
+    chosen = config.PICKUP_AREA_FIELD
+    if chosen not in config.PICKUP_AREA_CHOICES:
+        chosen = "city_Name"
+    return [chosen] + [name for name in FIELD_MAP["pickup_area"] if name != chosen]
 
 
 def read_field(raw, field):
     """Get one field from a raw booking, trying every name in FIELD_MAP."""
+    names = area_names() if field == "pickup_area" else FIELD_MAP[field]
     lower_case_raw = {str(key).lower(): value for key, value in raw.items()}
-    for name in FIELD_MAP[field]:
+    for name in names:
         value = lower_case_raw.get(name.lower())
         if value is not None and str(value).strip() != "":
             return str(value).strip()
@@ -65,8 +108,9 @@ def read_field(raw, field):
 def parse_pickup_time(text):
     """Read a pickup date/time and return it in Indian time (or None).
 
-    Accepts "2026-10-09T14:30:00", "2026-10-09 14:30", "09-10-2026 14:30",
-    "09/10/2026 02:30 PM" and the old .NET style "/Date(1760000000000)/".
+    Accepts the real format "05-08-2026 12:00" (DD-MM-YYYY HH:MM), a date
+    on its own, and the older guesses: "2026-10-09T14:30:00",
+    "09/10/2026 02:30 PM" and the .NET style "/Date(1760000000000)/".
     """
     if not text:
         return None
@@ -80,8 +124,8 @@ def parse_pickup_time(text):
     try:
         moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
-        for pattern in ("%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M", "%d/%m/%Y %H:%M:%S",
-                        "%d/%m/%Y %H:%M", "%d-%m-%Y %I:%M %p", "%d/%m/%Y %I:%M %p"):
+        for pattern in ("%d-%m-%Y %H:%M", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %I:%M %p", "%d-%m-%Y",
+                        "%d/%m/%Y %H:%M", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %I:%M %p", "%d/%m/%Y"):
             try:
                 moment = datetime.strptime(text, pattern)
                 break
@@ -100,14 +144,26 @@ def clean_booking(raw):
 
     The result is for use INSIDE the server only. It still holds the full
     driver name and mobile, so never send it out directly.
-    Returns None if the booking is missing its reference or pickup time.
+    Returns None if the booking has no reference. A booking whose date
+    can't be read is KEPT (pickup_at is None) and a warning is logged.
     """
     if not isinstance(raw, dict):
         return None
     booking = {field: read_field(raw, field) for field in FIELD_MAP}
-    booking["pickup_at"] = parse_pickup_time(booking.pop("pickup_datetime"))
-    if not booking["booking_ref"] or booking["pickup_at"] is None:
+
+    # Real API: "05-08-2026" + "12:00". Old guesses: one combined field.
+    date_text = booking.pop("pickup_date")
+    time_text = booking.pop("pickup_time")
+    when_text = booking.pop("pickup_datetime")
+    if date_text:
+        when_text = f"{date_text} {time_text}".strip()
+    booking["pickup_at"] = parse_pickup_time(when_text)
+
+    if not booking["booking_ref"]:
         return None
+    if booking["pickup_at"] is None:
+        # A date is not private, so log the raw text to help fix the format.
+        log.warning("booking_date_unreadable", date_text=when_text)
     return booking
 
 
@@ -116,10 +172,16 @@ def is_finished(booking):
     return any(word in status for word in FINISHED_STATUS_WORDS)
 
 
+def is_past(booking, today):
+    """True if the pickup was before today. An unreadable date is not past."""
+    return booking["pickup_at"] is not None and booking["pickup_at"].date() < today
+
+
 def current_bookings(raw_list, now=None):
     """Keep only today's and upcoming pickups that are not finished.
 
-    Sorted with the earliest pickup first.
+    With INCLUDE_PAST_BOOKINGS=true (UAT testing only) past pickups are kept too.
+    Sorted with the earliest pickup first; unreadable dates go last.
     Returns (bookings, number_of_unreadable_bookings_skipped).
     """
     today = (now or datetime.now(INDIA)).date()
@@ -130,12 +192,12 @@ def current_bookings(raw_list, now=None):
         if booking is None:
             skipped += 1
             continue
-        if booking["pickup_at"].date() < today:
+        if is_past(booking, today) and not config.INCLUDE_PAST_BOOKINGS:
             continue  # a past trip
         if is_finished(booking):
             continue
         bookings.append(booking)
-    bookings.sort(key=lambda b: b["pickup_at"])
+    bookings.sort(key=lambda b: (b["pickup_at"] is None, b["pickup_at"] or datetime.min.replace(tzinfo=INDIA)))
     return bookings, skipped
 
 
@@ -145,12 +207,20 @@ def is_chauffeur_allocated(booking):
 
 
 def first_name(full_name):
-    """Only the first word of the name: "Ramesh Kumar" -> "Ramesh"."""
+    """Only the first word of the name, in title case: "RAMESH KUMAR" -> "Ramesh"."""
     words = full_name.split()
-    return words[0] if words else ""
+    return words[0].title() if words else ""
+
+
+def status_name(status):
+    """The status to show: "Despatched" -> "Dispatched", others unchanged."""
+    return STATUS_NAMES.get(status.lower(), status)
 
 
 def _date_and_time(booking):
+    """("2026-08-05", "12:00"), or ("", "") if the date couldn't be read."""
+    if booking["pickup_at"] is None:
+        return "", ""
     return (
         booking["pickup_at"].strftime("%Y-%m-%d"),
         booking["pickup_at"].strftime("%H:%M"),
@@ -168,7 +238,7 @@ def dispatch_summary(booking):
         "pickup_date": pickup_date,
         "pickup_time": pickup_time,
         "pickup_area": booking["pickup_area"],
-        "dispatch_status": booking["status"],
+        "dispatch_status": status_name(booking["status"]),
         "chauffeur_allocated": is_chauffeur_allocated(booking),
     }
 
@@ -184,7 +254,10 @@ def not_allocated_summary(booking):
 
 
 def chauffeur_details(booking):
-    """The ONLY fields get_chauffeur_details may share (SOP 6 rule 3)."""
+    """The ONLY fields get_chauffeur_details may share (SOP 6 rule 3).
+
+    car_colour is left out when DriveCarClub doesn't send one.
+    """
     pickup_date, pickup_time = _date_and_time(booking)
     details = {
         "booking_ref": booking["booking_ref"],
@@ -192,9 +265,10 @@ def chauffeur_details(booking):
         "pickup_time": pickup_time,
         "chauffeur_first_name": first_name(booking["driver_name"]),
         "car_model": booking["car_model"],
-        "car_colour": booking["car_colour"],
         "registration_number": booking["registration_number"],
     }
+    if booking["car_colour"]:
+        details["car_colour"] = booking["car_colour"]
     if config.SHARE_CHAUFFEUR_MOBILE and booking["driver_mobile"]:
         details["chauffeur_mobile"] = booking["driver_mobile"]
     return details
@@ -203,6 +277,8 @@ def chauffeur_details(booking):
 def friendly_when(booking, now=None):
     """Words the AI can read out: "today (Friday 9 October) at 2:30 PM"."""
     pickup = booking["pickup_at"]
+    if pickup is None:
+        return "(date not available)"
     today = (now or datetime.now(INDIA)).date()
     day = f"{pickup.strftime('%A')} {pickup.day} {pickup.strftime('%B')}"
     if pickup.date() == today:

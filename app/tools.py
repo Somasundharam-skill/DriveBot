@@ -3,20 +3,23 @@
   check_dispatch_status   SOP 5: "Has my car been sent?"
   get_chauffeur_details   SOP 6: "Who is my chauffeur, which car?"
   send_otp, verify_otp    SOP 5 rule 1: prove the number on website chat
+  get_fare                "How much does a car cost?" (standard rates)
 
 Every tool returns a dict with:
   "outcome"  a fixed code the AI can rely on
   "say"      what the AI should tell the customer (SOP wording)
-plus only the allowlisted booking fields from mapper.py.
+plus only the allowlisted booking fields from mapper.py (or the fare
+fields from fares.py).
 
 The business rules live HERE in code, not in the AI's prompt:
 trusted number only, own bookings only, allowlisted fields only,
-today's and upcoming pickups only.
+today's and upcoming pickups only. get_fare needs no number, because
+fares are not personal data, and it never guesses a fare.
 """
 
 import time
 
-from app import browser_sessions, config, identity, log, mapper, otp
+from app import browser_sessions, config, fares, identity, log, mapper, otp
 from app.errors import DCCUnavailable, SMSUnavailable
 
 # ----------------------------------------------------------------------
@@ -128,10 +131,47 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "get_fare",
+        "description": (
+            "Gets DriveCarClub's standard fares (rate packages) for a type of car, a type of "
+            "trip and a city. Call this when the customer asks how much a car costs, the "
+            "fare, the rate or the price. All three details are required. If the customer "
+            "hasn't told you any of them (the city, the type of trip such as local or "
+            "outstation, or the type of car), ASK them first. Never guess or assume a "
+            "value, especially the city: do not take it from a booking, the phone number "
+            "or earlier in the chat unless the customer said it for this question. No "
+            "mobile number or OTP is needed. The result has an 'outcome' (found, not_found, "
+            "invalid_input, unavailable) and a 'say' field: tell the customer what 'say' "
+            "says, in their language. Quote the amounts exactly as given; never round, add "
+            "up, estimate or invent a fare. If the outcome is 'invalid_input', ask the "
+            "customer for the details 'say' mentions and call get_fare again."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "car_category": {
+                    "type": "string",
+                    "description": "The type of car, as the customer said it (for example Midsize).",
+                },
+                "service_type": {
+                    "type": "string",
+                    "description": "The type of trip, as the customer said it (for example Local or Outstation).",
+                },
+                "city_name": {
+                    "type": "string",
+                    "description": "The city, exactly as the customer said it (for example Gurugram). Never guess it.",
+                },
+            },
+            "required": ["car_category", "service_type", "city_name"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 BOOKING_TOOLS = ("check_dispatch_status", "get_chauffeur_details")
 OTP_TOOLS = ("send_otp", "verify_otp")
+FARE_TOOLS = ("get_fare",)
 
 # ----------------------------------------------------------------------
 # Wording shared by both tools.
@@ -290,7 +330,8 @@ def get_chauffeur_details(mobile, booking_ref):
         }
 
     details = mapper.chauffeur_details(booking)
-    car = " ".join(part for part in (details["car_colour"].lower(), details["car_model"]) if part) or "car"
+    # The colour is left out when DriveCarClub doesn't send one.
+    car = " ".join(part for part in (details.get("car_colour", "").lower(), details["car_model"]) if part) or "car"
     say = (
         f"Your chauffeur for the pickup {mapper.friendly_when(booking)} is "
         f"{details['chauffeur_first_name']}, driving a {car}, registration number "
@@ -423,6 +464,156 @@ def verify_otp(caller, code):
 
 
 # ----------------------------------------------------------------------
+# Tool 5: get_fare (standard fares from the GetRate API)
+# Fares are not personal data: no identity check, works on every channel.
+# ----------------------------------------------------------------------
+
+
+def _rupees(amount):
+    """2400 -> "₹2400", 18.5 -> "₹18.50". The amount itself is never rounded."""
+    return f"₹{amount}" if isinstance(amount, int) else f"₹{amount:.2f}"
+
+
+def _join_words(words):
+    """["city", "type of trip"] -> "city and type of trip"."""
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def _invalid_input_result(say):
+    return {
+        "outcome": "invalid_input",
+        "say": say,
+        "next_step": (
+            "Ask the customer for these details, then call get_fare again with what they "
+            "say. Never guess them."
+        ),
+    }
+
+
+def _package_text(package):
+    """One package read out: "8hrs 80kms: ₹2400, then ₹18 per extra km and ₹150 per extra hour"."""
+    text = (
+        f"{package['package_name']}: {_rupees(package['rate_inr'])}, then "
+        f"{_rupees(package['extra_km_rate_inr'])} per extra km and "
+        f"{_rupees(package['extra_hour_rate_inr'])} per extra hour"
+    )
+    if "outstation_allowance_inr" in package:
+        text += f", plus an outstation allowance of {_rupees(package['outstation_allowance_inr'])}"
+    if "night_stay_inr" in package:
+        text += f" and a night stay charge of {_rupees(package['night_stay_inr'])}"
+    return text
+
+
+def get_fare(arguments):
+    """Look up the standard fares for one car type, trip type and city.
+
+    Returns (result, inputs): "inputs" holds only the inputs that passed the
+    checks, so call_tool can log them safely.
+    """
+    arguments = arguments or {}
+
+    # 1. Every input must be given and be plain text.
+    inputs, missing, unclear = {}, [], []
+    for field, (_, words) in fares.INPUTS.items():
+        raw = arguments.get(field)
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            missing.append(words)
+            continue
+        value = fares.clean_input(raw)
+        if value is None:
+            unclear.append(words)
+        else:
+            inputs[field] = value
+    if missing:
+        return _invalid_input_result(
+            f"To check the fare, I need to know the {_join_words(missing)}. Could you tell me?"
+        ), inputs
+    if unclear:
+        return _invalid_input_result(
+            f"Sorry, I didn't understand the {_join_words(unclear)}. Could you tell me again?"
+        ), inputs
+
+    # 2. If DriveCarClub's lists are set, the value must be on them.
+    for field, (_, words) in fares.INPUTS.items():
+        if not fares.is_allowed(field, inputs[field]):
+            return _invalid_input_result(
+                f"I can check fares for these options for the {words}: "
+                f"{', '.join(fares.allow_list(field))}. Which one would you like?"
+            ), inputs
+
+    # 3. Ask DriveCarClub (or the 1-hour cache).
+    packages = fares.lookup(
+        get_client(), inputs["car_category"], inputs["service_type"], inputs["city_name"]
+    )
+    if not packages:
+        return {
+            "outcome": "not_found",
+            "say": (
+                f"I'm sorry, I couldn't find a standard rate for a {inputs['car_category']} car, "
+                f"{inputs['service_type']} trip in {inputs['city_name']}. "
+                f"For a quote, {_support_line()}."
+            ),
+        }, inputs
+
+    first = packages[0]
+    return {
+        "outcome": "found",
+        "packages": packages,
+        "say": (
+            f"Our standard rates for a {first['car_category'] or inputs['car_category']} car, "
+            f"{first['service_type'] or inputs['service_type']}, in "
+            f"{first['city'] or inputs['city_name']} are: "
+            + "; ".join(_package_text(p) for p in packages)
+            + f". {config.FARE_NOTE}"
+        ),
+        "next_step": "Quote these amounts exactly. Never round, add up, estimate or invent a fare.",
+    }, inputs
+
+
+def _call_fare_tool(name, arguments, caller):
+    """Run get_fare and log it. No identity check: fares are not personal."""
+    started = time.monotonic()
+    inputs = {}
+    try:
+        result, inputs = get_fare(arguments)
+    except DCCUnavailable as failure:
+        log.alert_perfox_team(
+            failure.reason, tool=name, conversation_id=caller.get("conversation_id")
+        )
+        result = _fare_unavailable_result(failure.reason)
+    except Exception as crash:  # a bug in our code: still never guess
+        log.alert_perfox_team(
+            "internal_error", tool=name, conversation_id=caller.get("conversation_id"),
+            error=f"{type(crash).__name__}: {crash}"[:200],
+        )
+        result = _fare_unavailable_result("internal_error")
+
+    # The inputs are not personal, so they are logged. Inputs that failed
+    # the checks are left out (they could be anything the customer typed).
+    log.info(
+        "tool_call",
+        tool=name,
+        conversation_id=caller.get("conversation_id"),
+        channel=caller.get("channel"),
+        car_category=inputs.get("car_category"),
+        service_type=inputs.get("service_type"),
+        city_name=inputs.get("city_name"),
+        outcome=result["outcome"],
+        reason=result.get("reason"),
+        duration_ms=round((time.monotonic() - started) * 1000),
+    )
+    return result
+
+
+def _fare_unavailable_result(reason):
+    return {
+        "outcome": "unavailable",
+        "reason": reason,
+        "say": f"I'm sorry, I can't check fares right now. {_support_line().capitalize()}.",
+    }
+
+
+# ----------------------------------------------------------------------
 # One entry point for tools/call: identity check, run, log.
 # ----------------------------------------------------------------------
 
@@ -439,6 +630,8 @@ def call_tool(name, arguments, caller):
     """
     if name in OTP_TOOLS:
         return _call_otp_tool(name, arguments, caller)
+    if name in FARE_TOOLS:
+        return _call_fare_tool(name, arguments, caller)
     if name not in BOOKING_TOOLS:
         raise UnknownTool(name)
 

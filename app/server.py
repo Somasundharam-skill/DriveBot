@@ -204,6 +204,11 @@ def log_startup_warnings():
         log.warning("unknown_dcc_mode", note=f"DCC_MODE={config.DCC_MODE!r} is not mock or live; using mock.")
     if config.DCC_MODE == "live" and not (config.DCC_USERNAME and config.DCC_PASSWORD):
         log.warning("missing_dcc_credentials", note="DCC_MODE=live but DCC_USERNAME or DCC_PASSWORD is empty.")
+    if config.INCLUDE_PAST_BOOKINGS:
+        log.warning("include_past_bookings_on", note="INCLUDE_PAST_BOOKINGS=true: past pickups are shown. UAT testing only!")
+    if config.PICKUP_AREA_FIELD not in config.PICKUP_AREA_CHOICES:
+        log.warning("unknown_pickup_area_field",
+                    note=f"PICKUP_AREA_FIELD={config.PICKUP_AREA_FIELD!r} is not city_Name or location; using city_Name.")
     if config.OTP_MODE == "plivo":
         if not (config.PLIVO_AUTH_ID and config.PLIVO_AUTH_TOKEN and config.PLIVO_SENDER_ID):
             log.warning("missing_plivo_settings", note="OTP_MODE=plivo but a PLIVO_* setting is empty: no code can be sent.")

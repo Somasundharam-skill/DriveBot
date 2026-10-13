@@ -177,7 +177,8 @@ def _pickup_for_page(booking):
     if item["chauffeur_allocated"]:
         details = mapper.chauffeur_details(booking)
         for field in ("chauffeur_first_name", "car_model", "car_colour", "registration_number"):
-            item[field] = details[field]
+            if field in details:  # car_colour is left out when there is none
+                item[field] = details[field]
     return item
 
 

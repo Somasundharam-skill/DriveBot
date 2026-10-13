@@ -2,7 +2,7 @@
 
 DriveBot is DriveCarClub's AI customer assistant, built on Perfox. Perfox runs the
 conversation. This small server gives DriveBot the business logic and data it needs
-through four tools:
+through five tools:
 
 | Tool | SOP | What it does |
 |---|---|---|
@@ -10,6 +10,7 @@ through four tools:
 | `get_chauffeur_details` | SOP 6 | "Who is my chauffeur, and which car?" |
 | `send_otp` | SOP 5 rule 1 | Website chat: texts a 6-digit code to the customer's number |
 | `verify_otp` | SOP 5 rule 1 | Website chat: checks the code, then the number is trusted |
+| `get_fare` | | "How much does a car cost?" Standard rates for a car type, trip type and city (section 6a) |
 
 Nothing else (booking, cancellation, payments) is built yet.
 
@@ -79,7 +80,35 @@ uv run python -m app.server
   Set `HOST=0.0.0.0` in `.env` when the server must accept outside connections.
 
 `DCC_MODE=mock` (the default) uses fake data. `DCC_MODE=live` calls the real DriveCarClub
-API and needs `DCC_USERNAME` and `DCC_PASSWORD`.
+API and needs `DCC_USERNAME` and `DCC_PASSWORD`. The mock data uses the same field names
+and formats as the real API, so both modes go through exactly the same mapping.
+
+### DriveCarClub booking fields
+
+The UAT DespatchedBooking API answers `{"status": "200", "message": "Success", "data": [...]}`.
+A top-level `status` other than `"200"` counts as a failure (`bad_response`, so the tool
+says `unavailable`). [app/mapper.py](app/mapper.py) reads these fields from each booking:
+
+| We share | Real field | Notes |
+|---|---|---|
+| Booking reference | `actual_bk_num` | |
+| Pickup date and time | `reportingDate` + `reportingTime` | `DD-MM-YYYY` and `HH:MM`, India time. If the date can't be read, the booking is kept (date left empty) and a `booking_date_unreadable` warning is logged. |
+| Pickup area | `city_Name`, else `location` | Order set by `PICKUP_AREA_FIELD`. `reportingAddress` is never used. |
+| Status | `status` | `Despatched` is shown as `Dispatched` |
+| Chauffeur first name | `chauffeurName` | First word only, title case: `RAMESH KUMAR` → `Ramesh` |
+| Car model | `carAlloted`, else `carBooked` | |
+| Registration number | `carNumber` | Unchanged |
+| Car colour | (none) | The API has no colour, so it is left out |
+| Chauffeur mobile | `chaufferMobile` (DriveCarClub's spelling) | Hidden while `SHARE_CHAUFFEUR_MOBILE = False` |
+
+Never read or shared: `individualsname`, `company_Name`, `b_Guest_Contact_No`,
+`reportingAddress`, `standinginstructions`, `dsNo`. Our older guessed field names are
+still accepted after the real ones.
+
+| Setting (`.env`) | What it does |
+|---|---|
+| `PICKUP_AREA_FIELD` | `city_Name` (default) or `location`: which field is read out as the pickup area. DriveCarClub hasn't confirmed which is right. Any other value is ignored (with a startup warning). |
+| `INCLUDE_PAST_BOOKINGS` | **UAT testing only.** `true` also shows pickups before today (the UAT test booking is in the past). Default `false`; a warning is logged at startup when it is `true`. |
 
 `OTP_MODE=mock` (the default) sends no SMS, and the code is always **123456**.
 `OTP_MODE=plivo` sends real SMS messages. See section 5 below.
@@ -91,12 +120,17 @@ Dates are always worked out from today in India time.
 
 | Number | What happens |
 |---|---|
-| 919000000001 | One booking today, car sent. Chauffeur Ramesh Kumar, white Toyota Innova Crysta, KA 01 AB 1234 |
+| 919000000001 | One booking today, car sent. Chauffeur RAMESH KUMAR (shared as "Ramesh"), Toyota Innova Crysta, KA01AB1234 |
 | 919000000002 | Three bookings: yesterday (Completed, so hidden), today and tomorrow |
 | 919000000003 | No bookings |
 | 919000000004 | One booking tomorrow, chauffeur not assigned yet |
 | 919000000005 | DriveCarClub server error |
 | 919000000006 | DriveCarClub does not answer in time (timeout) |
+
+Mock fares (`get_fare`, any phone number or none, any upper/lower case):
+Midsize / Local / Gurugram, Midsize / Local / New Delhi, Premium / Local / Gurugram, and
+Midsize / Outstation / Gurugram (with an outstation allowance and night stay). Anything
+else gives `not_found`.
 
 ## 5. OTP on website chat
 
@@ -220,11 +254,13 @@ websites can't post with a customer's cookie (CSRF protection).
    - Dispatch status: booking reference, pickup date, time and area (never the full address),
      status, and whether a chauffeur is allocated. No chauffeur details.
    - Chauffeur details: booking reference, pickup date and time, chauffeur **first name only**,
-     car model, colour and registration number.
-   - Never shared: surname, addresses, drop location, other drivers' details. The chauffeur's
+     car model, colour (only if DriveCarClub sends one; the UAT API doesn't) and registration number.
+   - Never shared: surname, the customer's name, company and guest number, addresses,
+     standing instructions, other drivers' details. The chauffeur's
      mobile stays hidden while `SHARE_CHAUFFEUR_MOBILE = False` in [app/config.py](app/config.py).
-4. **Today and upcoming only** (India time). Completed, closed and cancelled bookings are
-   hidden, and the earliest pickup comes first.
+4. **Today and upcoming only** (India time, from `reportingDate`). Completed, closed and
+   cancelled bookings are hidden, and the earliest pickup comes first. Only
+   `INCLUDE_PAST_BOOKINGS=true` (UAT testing) shows past pickups.
 5. **"Allocated"** means the booking has both a chauffeur name and a registration number.
 6. **Never guess.** If DriveCarClub fails (sign-in fails, 401 twice, 5xx, network error or
    timeout) the tool returns `unavailable`, DriveBot gives the support number, and the server
@@ -234,6 +270,39 @@ websites can't post with a customer's cookie (CSRF protection).
 
 Every tool result has an `outcome` (a fixed code) and a `say` field with the SOP wording
 for DriveBot to use.
+
+## 6a. Fares: `get_fare`
+
+`get_fare(car_category, service_type, city_name)` calls DriveCarClub's **GetRate** API
+(`DCC_RATE_URL`) with the same token as DespatchedBooking (same caching, one retry on 401,
+same timeout). It sends `{"CarCategory": ..., "ServiceType": ..., "CityName": ...}` and gets
+back `{"status": "200", "message": "Success", "data": [packages]}`.
+
+- **No identity needed.** Fares are not personal data, so it works on every channel,
+  including website chat without OTP.
+- **All three inputs are required.** The tool description tells the AI to ask the customer
+  for any missing one and never to guess, especially the city.
+- **Input checks.** Letters, spaces and hyphens only, at most 40 characters. Anything else
+  gives `invalid_input`, and DriveCarClub is not called. If an allow-list setting is filled,
+  the value must be on it (any upper/lower case).
+- **Cache.** Each (car category, service type, city) answer is kept for 1 hour, in any
+  upper/lower case. Failures are not cached.
+
+| Outcome | When | Result |
+|---|---|---|
+| `found` | DriveCarClub has rates | `packages`: `package_name`, `service_type`, `car_category`, `city`, `rate_inr`, `extra_km_rate_inr`, `extra_hour_rate_inr`, plus `outstation_allowance_inr` and `night_stay_inr` only when above 0. Amounts are numbers. `say` quotes them exactly as standard rates, followed by `FARE_NOTE`. |
+| `not_found` | Empty `data` list | `say` explains no rate was found and gives the support number. Never a guessed fare. |
+| `invalid_input` | Missing, not plain text, too long, or not on an allow-list | `say` asks for the detail again |
+| `unavailable` | API error, `status` not `"200"`, timeout, or rates we can't read | `say` gives the support number; `alert_perfox_team` is logged |
+
+The log line has the tool, the three inputs (only those that passed the checks), the
+outcome and the duration. No phone number is involved.
+
+| Setting (`.env`) | What it does |
+|---|---|
+| `DCC_RATE_URL` | The GetRate URL (default: the UAT URL) |
+| `FARE_CAR_CATEGORIES`, `FARE_SERVICE_TYPES`, `FARE_CITIES` | Optional allow-lists, comma-separated (for example `Midsize, Premium`). Empty = no check, because DriveCarClub hasn't given us the lists yet. |
+| `FARE_NOTE` | Added to every fare answer. Default: "Tolls, parking and taxes may be extra. For contract rates or an exact quote, please call our customer support team." |
 
 ## 7. Project layout
 
@@ -247,9 +316,10 @@ for DriveBot to use.
 | `app/otp.py` | OTP rules: making, hashing and checking codes, and the limits |
 | `app/sms.py` | Sending the SMS (mock or Plivo) |
 | `app/identity.py` | Trusted-number rules, phone formatting, per-conversation sessions |
-| `app/mapper.py` | `FIELD_MAP` and the field allowlists. **Update this when the real sample arrives.** |
+| `app/mapper.py` | `FIELD_MAP` (real DriveCarClub field names), date parsing, filtering and the field allowlists |
 | `app/drivecarclub.py` | Live DriveCarClub client: token caching, one retry on 401, timeouts |
-| `app/mock.py` | Fake data for the test numbers |
+| `app/fares.py` | `get_fare` input checks, GetRate field mapping, and the 1-hour fare cache |
+| `app/mock.py` | Fake data for the test numbers, and fake fares |
 | `app/config.py` | All settings (read from `.env`) |
 | `app/log.py`, `app/errors.py` | JSON logging, and the "DriveCarClub unavailable" and "SMS unavailable" errors |
 | `tests/run_tests.py` | All tests |
@@ -261,8 +331,11 @@ These are guesses in the code today. Each one is easy to change when the answer 
 
 | Item | What the code assumes now | Where to change it |
 |---|---|---|
-| Sample DespatchedBooking response (one and several bookings) | Field names like `BookingId`, `PickupDateTime`, `DriverName`, `CarNo`; a list, or a list inside `data`/`Data`/`bookings`/`result` | `FIELD_MAP` and `LIST_KEYS` in `app/mapper.py` |
-| Status values (sent, arrived, completed, cancelled...) | Statuses containing "complete", "close" or "cancel" are hidden | `FINISHED_STATUS_WORDS` in `app/mapper.py` |
+| Pickup area: `city_Name` or `location`? | `city_Name` | `PICKUP_AREA_FIELD` in `.env` |
+| Sample with several bookings, and with no bookings (is it `data: []`, `data: null` or another `status`?) | `status` `"200"` with a `data` list; anything else is `bad_response` | `unwrap_response_list` in `app/mapper.py` |
+| Fare lists: car categories, service types and cities | No check (any plain text is sent to GetRate) | `FARE_CAR_CATEGORIES`, `FARE_SERVICE_TYPES`, `FARE_CITIES` in `.env` |
+| GetRate production URL | UAT URL | `DCC_RATE_URL` in `.env` |
+| Status values besides `Despatched` (arrived, completed, cancelled...) | Statuses containing "complete", "close" or "cancel" are hidden | `FINISHED_STATUS_WORDS` in `app/mapper.py` |
 | Does the API return past trips? | We filter out anything before today ourselves | `app/mapper.py` |
 | Token API: method, response format, token field name | POST; plain string or JSON with `access_token`/`token`/`Token`/`AccessToken`/`data.token` | `app/drivecarclub.py` |
 | Token expiry | `expires_in` if given, otherwise `DCC_TOKEN_TTL_SECONDS` (3000) | `.env` |

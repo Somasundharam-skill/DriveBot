@@ -1,8 +1,9 @@
 """Talks to the real DriveCarClub API (used when DCC_MODE=live).
 
-Two calls (see the API reference in the SOP document):
+Three calls (see the API reference in the SOP document):
   1. Token API: sign in with HTTP Basic auth and get an access token.
   2. DespatchedBooking API: get the bookings for a mobile number.
+  3. GetRate API: get the fare packages for a car type, trip type and city.
 
 The token is kept (cached) and reused until 60 seconds before it expires.
 Any problem raises DCCUnavailable, so the tool can say "unavailable"
@@ -29,6 +30,7 @@ class DriveCarClubClient:
         self,
         token_url=None,
         booking_url=None,
+        rate_url=None,
         username=None,
         password=None,
         timeout=None,
@@ -40,6 +42,7 @@ class DriveCarClubClient:
         # (The tests pass their own values to talk to a fake server.)
         self.token_url = token_url or config.DCC_TOKEN_URL
         self.booking_url = booking_url or config.DCC_BOOKING_URL
+        self.rate_url = rate_url or config.DCC_RATE_URL
         self.username = username if username is not None else config.DCC_USERNAME
         self.password = password if password is not None else config.DCC_PASSWORD
         self.timeout = timeout or config.DCC_TIMEOUT_SECONDS
@@ -135,18 +138,35 @@ class DriveCarClubClient:
     # Bookings
     # ------------------------------------------------------------------
     def get_bookings(self, contact_no):
-        """Return the raw list of dispatched bookings for "91XXXXXXXXXX".
+        """Return the raw list of dispatched bookings for "91XXXXXXXXXX"."""
+        return self._post_with_token(self.booking_url, {"ContactNo": contact_no})
+
+    # ------------------------------------------------------------------
+    # Rates (fares)
+    # ------------------------------------------------------------------
+    def get_rates(self, car_category, service_type, city_name):
+        """Return the raw list of fare packages (an empty list = no rate found)."""
+        return self._post_with_token(
+            self.rate_url,
+            {"CarCategory": car_category, "ServiceType": service_type, "CityName": city_name},
+        )
+
+    # ------------------------------------------------------------------
+    # Shared by both APIs
+    # ------------------------------------------------------------------
+    def _post_with_token(self, url, payload):
+        """POST to a DriveCarClub API and return the list under "data".
 
         If the token has expired (401) we get a new one and try ONCE more.
         """
         token = self.get_token()
-        response = self._post_booking_request(contact_no, token)
+        response = self._post(url, payload, token)
 
         if response.status_code == 401:
             log.info("dcc_token_rejected_retrying")
             self.forget_token(token)
             token = self.get_token()
-            response = self._post_booking_request(contact_no, token)
+            response = self._post(url, payload, token)
             if response.status_code == 401:
                 raise DCCUnavailable("auth_failed")
 
@@ -159,18 +179,18 @@ class DriveCarClubClient:
             body = response.json()
         except ValueError:
             raise DCCUnavailable("bad_response")
-        bookings = mapper.unwrap_booking_list(body)
-        if bookings is None:
+        items = mapper.unwrap_response_list(body)  # also checks status is "200"
+        if items is None:
             raise DCCUnavailable("bad_response")
-        return bookings
+        return items
 
-    def _post_booking_request(self, contact_no, token):
-        """One call to the DespatchedBooking API."""
+    def _post(self, url, payload, token):
+        """One call to a DriveCarClub API."""
         header_value = f"{self.token_prefix} {token}" if self.token_prefix else token
         try:
             return requests.post(
-                self.booking_url,
-                json={"ContactNo": contact_no},
+                url,
+                json=payload,
                 headers={self.token_header: header_value},
                 timeout=self.timeout,
             )

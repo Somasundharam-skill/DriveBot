@@ -32,6 +32,11 @@ def _yes_no(name, default="false"):
     return _text(name, default).lower() in ("true", "yes", "1")
 
 
+def _list(name):
+    """Read a comma-separated setting: "Midsize, Premium" -> ["Midsize", "Premium"]."""
+    return [item.strip() for item in _text(name).split(",") if item.strip()]
+
+
 # --- MCP server --------------------------------------------------------
 MCP_API_KEY = _text("MCP_API_KEY")
 HOST = _text("HOST", "127.0.0.1")
@@ -56,12 +61,39 @@ DCC_BOOKING_URL = _text(
     "DCC_BOOKING_URL",
     "https://drivecarclub.com/CarclubCRMUAT/Api/Home/DespatchedBooking",
 )
+DCC_RATE_URL = _text(
+    "DCC_RATE_URL",
+    "https://drivecarclub.com/CarclubcrmUAT/Api/Home/GetRate",
+)
 DCC_USERNAME = _text("DCC_USERNAME")
 DCC_PASSWORD = _text("DCC_PASSWORD")
 DCC_TOKEN_HEADER = _text("DCC_TOKEN_HEADER", "Authorization")
 DCC_TOKEN_PREFIX = _text("DCC_TOKEN_PREFIX", "Bearer")
 DCC_TOKEN_TTL_SECONDS = _number("DCC_TOKEN_TTL_SECONDS", 3000)
 DCC_TIMEOUT_SECONDS = _number("DCC_TIMEOUT_SECONDS", 5)
+
+# Which booking field is read out as the pickup area: "city_Name" or
+# "location". DriveCarClub hasn't confirmed which is right. The full
+# address (reportingAddress) is never an option.
+PICKUP_AREA_CHOICES = ("city_Name", "location")
+PICKUP_AREA_FIELD = _text("PICKUP_AREA_FIELD", "city_Name")
+
+# UAT TESTING ONLY: also show pickups from before today (the UAT test
+# booking is in the past). Must be "false" in production.
+INCLUDE_PAST_BOOKINGS = _yes_no("INCLUDE_PAST_BOOKINGS")
+
+# --- Fares (get_fare tool) ---------------------------------------------
+# Optional allow-lists, comma-separated (for example "Midsize, Premium").
+# Empty = no check, because DriveCarClub hasn't given us the lists yet.
+FARE_CAR_CATEGORIES = _list("FARE_CAR_CATEGORIES")
+FARE_SERVICE_TYPES = _list("FARE_SERVICE_TYPES")
+FARE_CITIES = _list("FARE_CITIES")
+# Added to every fare answer.
+FARE_NOTE = _text(
+    "FARE_NOTE",
+    "Tolls, parking and taxes may be extra. For contract rates or an exact quote, "
+    "please call our customer support team.",
+)
 
 # --- OTP for website chat (SOP 5 rule 1) -------------------------------
 # "mock" = no SMS is sent and the code is always 123456 (testing only).

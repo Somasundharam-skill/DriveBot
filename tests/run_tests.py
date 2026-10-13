@@ -16,6 +16,10 @@ os.environ["DCC_TIMEOUT_SECONDS"] = "1"
 os.environ["OTP_MODE"] = "mock"  # no SMS; the code is always 123456
 os.environ["KEEP_ALIVE_URL"] = ""  # never ping the real server from tests
 os.environ["ENABLE_DOCS"] = "false"
+os.environ["INCLUDE_PAST_BOOKINGS"] = "false"  # the default; one test switches it on
+os.environ["PICKUP_AREA_FIELD"] = "city_Name"
+for fare_list in ("FARE_CAR_CATEGORIES", "FARE_SERVICE_TYPES", "FARE_CITIES"):
+    os.environ[fare_list] = ""  # no allow-lists; one test fills FARE_CITIES
 
 import base64
 import json
@@ -29,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fastapi.testclient import TestClient
 
-from app import browser_sessions, config, identity, otp, sms
+from app import browser_sessions, config, fares, identity, otp, sms, tools
 from app.drivecarclub import DriveCarClubClient
 from app.errors import DCCUnavailable, SMSUnavailable
 from app.mapper import INDIA
@@ -92,7 +96,13 @@ def call(tool, arguments=None, phone=None, channel="phone", conversation_id="con
 
 
 def contains_none(text, words):
-    return not any(word in text for word in words)
+    """True if none of the words is in the text (ignoring upper/lower case)."""
+    return not any(word.lower() in text.lower() for word in words)
+
+
+# Private fields in the mock data (customer name, company, guest number,
+# address, standing instructions). They must never appear in any result.
+MOCK_PRIVATE = ["PRIYA", "TESTCUSTOMER", "Mockco", "919000000099", "Prestige", "Flat 12B", "gate 3"]
 
 
 # ----------------------------------------------------------------------
@@ -113,9 +123,10 @@ check("initialize defaults protocolVersion to 2024-11-05",
 
 response = rpc("tools/list")
 tool_list = response.json()["result"]["tools"]
-check("tools/list returns 4 tools", len(tool_list) == 4)
-check("tools/list has the OTP tools",
-      {t["name"] for t in tool_list} == {"check_dispatch_status", "get_chauffeur_details", "send_otp", "verify_otp"})
+check("tools/list returns 5 tools", len(tool_list) == 5)
+check("tools/list has the OTP and fare tools",
+      {t["name"] for t in tool_list} == {"check_dispatch_status", "get_chauffeur_details", "send_otp", "verify_otp",
+                                         "get_fare"})
 check("tools have name, description, input_schema",
       all(t.get("name") and t.get("description") and t.get("input_schema") for t in tool_list))
 
@@ -154,13 +165,15 @@ print("\n--- check_dispatch_status ---")
 result, text = call("check_dispatch_status", phone="919000000001")
 check("one booking -> outcome 'one'", result["outcome"] == "one", text)
 check("one booking -> chauffeur_allocated true", result.get("booking", {}).get("chauffeur_allocated") is True)
-check("one booking -> pickup area only", result.get("booking", {}).get("pickup_area") == "Koramangala")
+check("one booking -> pickup area only", result.get("booking", {}).get("pickup_area") == "Bengaluru")
+check("one booking -> 'Despatched' shown as 'Dispatched'",
+      result.get("booking", {}).get("dispatch_status") == "Dispatched")
 check("one booking -> 'say' confirms car sent and offers details",
       "has been sent" in result["say"] and "chauffeur" in result["say"])
 check("summary has no chauffeur name",
       contains_none(text, ["Ramesh", "Kumar"]), text)
-check("summary has no full address, drop or driver mobile",
-      contains_none(text, ["Prestige", "Flat", "Airport", "9845012345"]), text)
+check("summary has no customer details, address or driver mobile",
+      contains_none(text, MOCK_PRIVATE + ["9845012345"]), text)
 check("summary has only the allowlisted fields",
       set(result["booking"]) == {"booking_ref", "pickup_date", "pickup_time", "pickup_area",
                                  "dispatch_status", "chauffeur_allocated"})
@@ -173,8 +186,8 @@ check("yesterday's completed trip hidden (2 current)", len(result.get("bookings"
 check("several sorted earliest first",
       [b["booking_ref"] for b in result.get("bookings", [])] == ["DCC100202", "DCC100203"])
 check("several -> asks which pickup", "Which pickup" in result["say"])
-check("several -> no chauffeur names, addresses or drop",
-      contains_none(text, ["Mohammed", "Anil", "Sharma", "Prestige", "Airport"]), text)
+check("several -> no chauffeur names, customer details or addresses",
+      contains_none(text, ["Mohammed", "Anil", "Sharma"] + MOCK_PRIVATE), text)
 
 result, text = call("check_dispatch_status", phone="919000000003")
 check("no bookings -> outcome 'none'", result["outcome"] == "none", text)
@@ -202,7 +215,7 @@ print("\n--- trusted number ---")
 
 result, text = call("check_dispatch_status", phone="919000000001", channel="web", conversation_id="web-1")
 check("web chat without OTP -> verification_needed", result["outcome"] == "verification_needed", text)
-check("verification_needed leaks no booking", "booking" not in result and "Koramangala" not in text)
+check("verification_needed leaks no booking", "booking" not in result and "Bengaluru" not in text)
 
 identity.get_session("web-2")["verified_mobile"] = "919000000001"
 result, text = call("check_dispatch_status", phone="919000000001", channel="web", conversation_id="web-2")
@@ -244,13 +257,14 @@ check("first name only", details.get("chauffeur_first_name") == "Ramesh")
 check("no surname anywhere", "Kumar" not in text, text)
 check("no chauffeur mobile (SHARE_CHAUFFEUR_MOBILE is False)",
       "chauffeur_mobile" not in details and "9845012345" not in text)
-check("car model, colour and registration shared",
-      details.get("car_model") == "Toyota Innova Crysta" and details.get("car_colour") == "White"
-      and details.get("registration_number") == "KA 01 AB 1234")
+check("car model (carAlloted) and registration shared",
+      details.get("car_model") == "Toyota Innova Crysta" and details.get("registration_number") == "KA01AB1234")
+check("no colour field -> car_colour left out, never 'None'",
+      "car_colour" not in details and "None" not in text, text)
 check("only the allowlisted chauffeur fields",
       set(details) == {"booking_ref", "pickup_date", "pickup_time", "chauffeur_first_name",
-                       "car_model", "car_colour", "registration_number"})
-check("no address or drop location", contains_none(text, ["Prestige", "Airport", "Koramangala"]), text)
+                       "car_model", "registration_number"})
+check("no customer details, address or area", contains_none(text, MOCK_PRIVATE + ["Bengaluru"]), text)
 
 result, text = call("get_chauffeur_details", {"booking_ref": "DCC100401"}, phone="919000000004")
 check("not allocated -> 'not_allocated'", result["outcome"] == "not_allocated", text)
@@ -260,7 +274,7 @@ check("not allocated -> SOP wording",
 result, text = call("get_chauffeur_details", {"booking_ref": "DCC100202"}, phone="919000000001")
 check("someone else's booking -> not_found", result["outcome"] == "not_found", text)
 check("someone else's booking leaks nothing",
-      contains_none(text, ["Mohammed", "Irfan", "Maruti", "KA 51", "HSR", "DCC100202"]), text)
+      contains_none(text, ["Mohammed", "Irfan", "Maruti", "KA51", "Hosur", "DCC100202"]), text)
 
 result, text = call("get_chauffeur_details", {"booking_ref": "dcc100202"}, phone="919000000002")
 check("choose one of several with lower-case ref -> shared",
@@ -547,9 +561,9 @@ check("my-pickups when signed in -> 1 pickup", response.status_code == 200 and l
 check("my-pickups has only the safe fields",
       pickups and set(pickups[0]) == {"booking_ref", "pickup_date", "pickup_time", "pickup_area", "dispatch_status",
                                       "chauffeur_allocated", "when", "chauffeur_first_name", "car_model",
-                                      "car_colour", "registration_number"}, pickups)
-check("my-pickups has no surname, address, drop or driver mobile",
-      contains_none(response.text, ["Kumar", "Prestige", "Flat", "Airport", "9845012345"]), response.text)
+                                      "registration_number"}, pickups)
+check("my-pickups has no surname, customer details, address or driver mobile",
+      contains_none(response.text, ["Kumar", "9845012345"] + MOCK_PRIVATE), response.text)
 
 browser_d = browser()
 site_get(browser_d, "/api/session")
@@ -667,14 +681,53 @@ check("log never has the full mobile", all("919000000001" not in line for line i
 # ----------------------------------------------------------------------
 print("\n--- live client (fake DriveCarClub server) ---")
 
-counts = {"token": 0, "bookings": 0}
+counts = {"token": 0, "bookings": 0, "rates": 0}
 plivo_requests = []
 TODAY_BOOKING = {
-    "BookingId": "LIVE1", "PickupDateTime": datetime.now(INDIA).strftime("%Y-%m-%dT23:00:00"),
-    "PickupArea": "MG Road", "Status": "Dispatched", "DriverName": "Test Driver",
-    "CarModel": "Swift", "CarColour": "Red", "CarNo": "KA 01 X 1",
+    "actual_bk_num": "LIVE1", "reportingDate": datetime.now(INDIA).strftime("%d-%m-%Y"),
+    "reportingTime": "23:00", "city_Name": "Testcity", "status": "Despatched",
+    "chauffeurName": "TEST DRIVER", "carAlloted": "Swift", "carNumber": "KA01X1",
 }
 GOOD_BASIC = "Basic " + base64.b64encode(b"uat-user:uat-pass").decode()
+
+# The real UAT DespatchedBooking response format, with FAKE values only.
+# The private fields have distinct fake values so the tests can prove
+# none of them leaks.
+UAT_BOOKING = {
+    "msg": None, "actual_bk_num": "BCR-XXX-0000001", "location": "New Delhi",
+    "company_Name": "FAKECOMPANY PVT LTD", "individualsname": "GUESTNAME TESTCUSTOMER",
+    "b_Guest_Contact_No": "919111111111",
+    "reportingDate": "05-08-2026", "reportingTime": "12:00", "reportingAddress": "FAKE ADDRESS LINE",
+    "standinginstructions": "STANDING NOTE", "carBooked": "Swift Dzire", "carAlloted": "Swift Dzire",
+    "car_Owned_By": None, "carNumber": "5792-DL1ZD", "chauffeurName": "FIRSTNAME LASTNAME",
+    "chaufferMobile": "9222222222", "dsNo": "BCR-XXX-0000002", "status": "Despatched",
+    "vip": "False", "city_Name": "Gurugram",
+}
+UAT_PRIVATE = ["LASTNAME", "GUESTNAME", "TESTCUSTOMER", "FAKECOMPANY", "FAKE ADDRESS",
+               "919111111111", "9222222222", "STANDING NOTE", "BCR-XXX-0000002"]
+UAT_PHONE, UAT_ERROR_PHONE, UAT_BAD_DATE_PHONE = "919100000001", "919100000002", "919100000003"
+uat_responses = {
+    UAT_PHONE: {"status": "200", "message": "Success", "data": [UAT_BOOKING]},
+    UAT_ERROR_PHONE: {"status": "500", "message": "Error", "data": None},
+    # Same booking, but a date we can't read and no car allotted yet.
+    UAT_BAD_DATE_PHONE: {"status": "200", "message": "Success",
+                         "data": [{**UAT_BOOKING, "reportingDate": "not a date", "carAlloted": "",
+                                   "carBooked": "Toyota Etios"}]},
+}
+
+# GetRate API responses, chosen by CityName (section 10).
+RATES_EMPTY = {"status": "200", "message": "Success", "data": []}
+rate_responses = {
+    "Gurugram": {"status": "200", "message": "Success", "data": [
+        {"packageName": "8hrs 80kms", "serviceType": "Local - within city limits", "carCategory": "Midsize",
+         "cityName": "Gurugram", "rate": "2400.00", "extra_Km_Rate": "18.00", "extra_Hr_Rate": "150.00",
+         "outstation_Allowance": "0.00", "night_Stay": "0.00"},
+        {"packageName": "4hrs 40kms", "serviceType": "Local - within city limits", "carCategory": "Midsize",
+         "cityName": "Gurugram", "rate": "1350.00", "extra_Km_Rate": "18.00", "extra_Hr_Rate": "150.00",
+         "outstation_Allowance": "0.00", "night_Stay": "0.00"},
+    ]},
+    "Errorcity": {"status": "500", "message": "Error", "data": None},
+}
 
 
 class FakeDriveCarClub(BaseHTTPRequestHandler):
@@ -715,7 +768,14 @@ class FakeDriveCarClub(BaseHTTPRequestHandler):
                 return self.send(500, {"error": "boom"})
             if auth == "Bearer tok1":
                 return self.send(401, {"error": "token expired"})  # first token is "expired"
-            return self.send(200, {"Data": [TODAY_BOOKING]})
+            return self.send(200, {"status": "200", "message": "Success", "data": [TODAY_BOOKING]})
+
+        if self.path == "/uat-bookings":  # the real UAT response format (section 9)
+            return self.send(200, uat_responses[body.get("ContactNo")])
+
+        if self.path == "/rates":  # the GetRate API (section 10)
+            counts["rates"] += 1
+            return self.send(200, rate_responses.get(body.get("CityName"), RATES_EMPTY))
 
         if self.path.startswith("/v1/Account/"):  # fake Plivo Message API
             plivo_requests.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": body})
@@ -735,9 +795,9 @@ threading.Thread(target=fake_server.serve_forever, daemon=True).start()
 base_url = f"http://127.0.0.1:{fake_server.server_address[1]}"
 
 
-def live_client(token_path="/token", booking_path="/bookings", timeout=2):
+def live_client(token_path="/token", booking_path="/bookings", rate_path="/rates", timeout=2):
     return DriveCarClubClient(
-        token_url=base_url + token_path, booking_url=base_url + booking_path,
+        token_url=base_url + token_path, booking_url=base_url + booking_path, rate_url=base_url + rate_path,
         username="uat-user", password="uat-pass", timeout=timeout,
         token_ttl=3000, token_header="Authorization", token_prefix="Bearer",
     )
@@ -758,7 +818,7 @@ check("expired token: one 401, then refresh and success",
 
 bookings = dcc.get_bookings("919000000001")
 check("next lookup reuses the cached token", counts["token"] == 2 and counts["bookings"] == 3, counts)
-check("dict response with 'Data' list is unwrapped", bookings and bookings[0]["BookingId"] == "LIVE1")
+check("real response: list under 'data' is unwrapped", bookings and bookings[0]["actual_bk_num"] == "LIVE1")
 
 tokens_before = counts["token"]
 reason = failure_reason(lambda: dcc.get_bookings("919999999401"))
@@ -796,6 +856,178 @@ check("plivo: 5xx is a failure",
 check("plivo: missing settings is a failure",
       failure_reason(lambda: sms.send_with_plivo("919876543210", "hi", auth_id="", auth_token="",
                                                  sender_id="", base_url=base_url)) == "plivo_not_configured")
+
+# ----------------------------------------------------------------------
+# 9. The real UAT response format, through the tools (fake values)
+# ----------------------------------------------------------------------
+print("\n--- real UAT response format ---")
+
+saved_client = tools._client
+tools._client = live_client(booking_path="/uat-bookings")  # the live client, fed the UAT format
+uat_texts = []
+log_lines.clear()
+
+
+def uat_call(tool, arguments=None, phone=UAT_PHONE):
+    result, text = call(tool, arguments, phone=phone, conversation_id="uat")
+    uat_texts.append(text)
+    return result, text
+
+
+check("INCLUDE_PAST_BOOKINGS is false by default", config.INCLUDE_PAST_BOOKINGS is False)
+result, text = uat_call("check_dispatch_status")
+check("past UAT booking hidden by default", result["outcome"] == "none", text)
+
+config.INCLUDE_PAST_BOOKINGS = True
+result, text = uat_call("check_dispatch_status")
+booking = result.get("booking", {})
+check("INCLUDE_PAST_BOOKINGS=true -> past booking shown", result["outcome"] == "one", text)
+check("actual_bk_num is the booking_ref", booking.get("booking_ref") == "BCR-XXX-0000001", booking)
+check("reportingDate (DD-MM-YYYY) and reportingTime parsed",
+      booking.get("pickup_date") == "2026-08-05" and booking.get("pickup_time") == "12:00", booking)
+check("say reads the date and time", "5 August at 12:00 PM" in result["say"], result["say"])
+check("city_Name is the pickup area", booking.get("pickup_area") == "Gurugram", booking)
+check("'Despatched' -> dispatch_status 'Dispatched'", booking.get("dispatch_status") == "Dispatched", booking)
+check("chauffeur counts as allocated", booking.get("chauffeur_allocated") is True, booking)
+
+result, text = uat_call("get_chauffeur_details", {"booking_ref": "BCR-XXX-0000001"})
+details = result.get("chauffeur", {})
+check("UAT chauffeur shared", result["outcome"] == "shared", text)
+check("first name only, title case: 'Firstname'", details.get("chauffeur_first_name") == "Firstname", details)
+check("car model is carAlloted, registration is carNumber unchanged",
+      details.get("car_model") == "Swift Dzire" and details.get("registration_number") == "5792-DL1ZD", details)
+check("no colour in the API -> car_colour left out, no 'None'",
+      "car_colour" not in details and "None" not in text, text)
+check("chauffeur mobile hidden (SHARE_CHAUFFEUR_MOBILE is False)", "chauffeur_mobile" not in details)
+
+config.PICKUP_AREA_FIELD = "location"
+result, text = uat_call("check_dispatch_status")
+check("PICKUP_AREA_FIELD=location -> location is the area",
+      result.get("booking", {}).get("pickup_area") == "New Delhi", text)
+config.PICKUP_AREA_FIELD = "reportingAddress"
+result, text = uat_call("check_dispatch_status")
+check("PICKUP_AREA_FIELD=reportingAddress is refused (city_Name used)",
+      result.get("booking", {}).get("pickup_area") == "Gurugram", text)
+config.PICKUP_AREA_FIELD = "city_Name"
+config.INCLUDE_PAST_BOOKINGS = False
+
+result, text = uat_call("check_dispatch_status", phone=UAT_BAD_DATE_PHONE)
+check("unreadable date -> booking kept, not dropped", result["outcome"] == "one", text)
+check("unreadable date -> empty date and time",
+      result.get("booking", {}).get("pickup_date") == "" and result.get("booking", {}).get("pickup_time") == "", text)
+check("unreadable date -> warning logged", any("booking_date_unreadable" in line for line in log_lines))
+result, text = uat_call("get_chauffeur_details", {"booking_ref": "BCR-XXX-0000001"}, phone=UAT_BAD_DATE_PHONE)
+check("empty carAlloted -> carBooked used", result.get("chauffeur", {}).get("car_model") == "Toyota Etios", text)
+
+result, text = uat_call("check_dispatch_status", phone=UAT_ERROR_PHONE)
+check("top-level status not '200' -> unavailable / bad_response",
+      result["outcome"] == "unavailable" and result.get("reason") == "bad_response", text)
+
+check("no surname, customer name, company, address, guest number or chauffeur mobile in any tool result",
+      all(contains_none(t, UAT_PRIVATE) for t in uat_texts))
+check("none of them in any log line either", all(contains_none(line, UAT_PRIVATE) for line in log_lines))
+tools._client = saved_client
+
+# ----------------------------------------------------------------------
+# 10. get_fare
+# ----------------------------------------------------------------------
+print("\n--- get_fare ---")
+
+
+def fare(car_category="Midsize", service_type="Local", city_name="Gurugram", channel="phone", phone="919000000003"):
+    """Call get_fare. Arguments set to None are left out."""
+    arguments = {"car_category": car_category, "service_type": service_type, "city_name": city_name}
+    return call("get_fare", {k: v for k, v in arguments.items() if v is not None},
+                phone=phone, channel=channel, conversation_id="fare")
+
+
+# Mock mode (the default client).
+fares.clear_cache()
+log_lines.clear()
+result, text = fare()
+packages = result.get("packages", [])
+check("mock: found two packages", result["outcome"] == "found" and len(packages) == 2, text)
+check("mock: amounts are numbers, not text",
+      packages and packages[0]["rate_inr"] == 2400 and isinstance(packages[0]["rate_inr"], (int, float))
+      and packages[0]["extra_km_rate_inr"] == 18 and packages[0]["extra_hour_rate_inr"] == 150, packages)
+check("mock: zero allowances are left out",
+      all("outstation_allowance_inr" not in p and "night_stay_inr" not in p for p in packages), packages)
+check("mock: package has exactly the fare fields",
+      packages and set(packages[0]) == {"package_name", "service_type", "car_category", "city", "rate_inr",
+                                        "extra_km_rate_inr", "extra_hour_rate_inr"}, packages)
+check("say quotes the exact amounts as standard rates, plus FARE_NOTE",
+      "standard rates" in result["say"] and "₹2400" in result["say"] and "₹1350" in result["say"]
+      and config.FARE_NOTE in result["say"], result["say"])
+fare_logs = [json.loads(line) for line in log_lines if '"tool_call"' in line]
+check("log has tool, the three inputs, outcome and duration",
+      fare_logs and fare_logs[0]["tool"] == "get_fare" and fare_logs[0]["car_category"] == "Midsize"
+      and fare_logs[0]["service_type"] == "Local" and fare_logs[0]["city_name"] == "Gurugram"
+      and fare_logs[0]["outcome"] == "found" and "duration_ms" in fare_logs[0], fare_logs)
+
+result, text = fare(service_type="Outstation")
+package = (result.get("packages") or [{}])[0]
+check("mock: allowances above 0 are included",
+      package.get("outstation_allowance_inr") == 300 and package.get("night_stay_inr") == 300, text)
+
+result, text = fare(city_name="Atlantis")
+check("mock: unknown city -> not_found with support number",
+      result["outcome"] == "not_found" and "customer support" in result["say"]
+      and "packages" not in result and "₹" not in result["say"], text)
+
+result, text = fare(channel="web", phone=None)
+check("works on web chat without OTP", result["outcome"] == "found", text)
+
+result, text = fare(city_name=None)
+check("missing city -> invalid_input asking for the city",
+      result["outcome"] == "invalid_input" and "city" in result["say"], text)
+
+# The live client against the fake GetRate API.
+saved_client = tools._client
+tools._client = live_client()
+fares.clear_cache()
+log_lines.clear()
+
+result, text = fare()
+packages = result.get("packages", [])
+check("live: found two packages, amounts as numbers",
+      result["outcome"] == "found" and len(packages) == 2 and packages[1]["rate_inr"] == 1350, text)
+check("live: zero allowances left out",
+      all("outstation_allowance_inr" not in p and "night_stay_inr" not in p for p in packages), packages)
+check("live: one API call", counts["rates"] == 1, counts)
+
+result, text = fare("midsize", "LOCAL", "gurugram")
+check("cache: same question (any case) within the hour -> no second API call",
+      result["outcome"] == "found" and counts["rates"] == 1, counts)
+for key in fares._cache:
+    fares._cache[key] = (time.monotonic() - 1, fares._cache[key][1])  # pretend an hour has passed
+fare()
+check("cache: after an hour -> called again", counts["rates"] == 2, counts)
+
+result, text = fare(city_name="Nowhere")
+check("empty data list -> not_found", result["outcome"] == "not_found", text)
+
+result, text = fare(city_name="Errorcity")
+check("status not '200' -> unavailable / bad_response",
+      result["outcome"] == "unavailable" and result.get("reason") == "bad_response", text)
+check("API failure -> alert_perfox_team logged", any("alert_perfox_team" in line for line in log_lines))
+
+calls_before = counts["rates"]
+for bad_input, label in (("<script>", "'<script>'"), ("a" * 200, "200 characters"),
+                         ("Gurugram1", "a digit"), (123, "a number")):
+    result, text = fare(city_name=bad_input)
+    check(f"{label} as city -> invalid_input", result["outcome"] == "invalid_input", text)
+check("invalid input -> no API call", counts["rates"] == calls_before, counts)
+check("invalid input is not logged", all("<script>" not in line and "a" * 200 not in line for line in log_lines))
+
+config.FARE_CITIES = ["Gurugram", "New Delhi"]
+result, text = fare(city_name="Mumbai")
+check("allow-list set -> city not on it is invalid_input, listing the options",
+      result["outcome"] == "invalid_input" and "New Delhi" in result["say"], text)
+check("allow-list rejection -> no API call", counts["rates"] == calls_before, counts)
+result, text = fare(city_name="gurugram")
+check("allow-list set -> city on it (any case) is found", result["outcome"] == "found", text)
+config.FARE_CITIES = []
+tools._client = saved_client
 
 fake_server.shutdown()
 
