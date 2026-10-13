@@ -116,17 +116,19 @@ def clean_packages(raw_list):
 
 
 def lookup(client, car_category, service_type, city_name):
-    """Return the fare packages for one combination (an empty list = no rate).
+    """Return (packages, source) for one combination. No packages = no rate.
 
+    "source" is "cache", or the client's source ("live" or "mock").
     Uses the 1-hour cache, so the same question (in any upper/lower case)
-    only calls DriveCarClub once an hour. Failures are not cached.
+    only calls DriveCarClub once an hour. Only found fares are cached:
+    "no rate" and failures are asked again next time.
     Raises DCCUnavailable if DriveCarClub fails.
     """
     key = (car_category.lower(), service_type.lower(), city_name.lower())
     with _cache_lock:
         cached = _cache.get(key)
         if cached and time.monotonic() < cached[0]:
-            return cached[1]
+            return cached[1], "cache"
 
     raw_list = client.get_rates(car_category, service_type, city_name)
     packages, skipped = clean_packages(raw_list)
@@ -137,11 +139,12 @@ def lookup(client, car_category, service_type, city_name):
         # DriveCarClub sent rates but we could read none: don't say "no rate".
         raise DCCUnavailable("bad_response")
 
-    with _cache_lock:
-        if len(_cache) >= CACHE_MAX_ENTRIES:
-            _cache.clear()
-        _cache[key] = (time.monotonic() + CACHE_SECONDS, packages)
-    return packages
+    if packages:
+        with _cache_lock:
+            if len(_cache) >= CACHE_MAX_ENTRIES:
+                _cache.clear()
+            _cache[key] = (time.monotonic() + CACHE_SECONDS, packages)
+    return packages, client.source
 
 
 def clear_cache():

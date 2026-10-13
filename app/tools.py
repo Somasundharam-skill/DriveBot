@@ -210,20 +210,41 @@ def _unavailable_result(reason):
 
 # ----------------------------------------------------------------------
 # Which DriveCarClub client to use (mock or live). Created once.
+# The booking tools follow DCC_MODE; get_fare follows DCC_RATE_MODE.
+# When both are live they share ONE live client, so one token is used.
 # ----------------------------------------------------------------------
-_client = None
+_client = None       # for the booking tools
+_rate_client = None  # for get_fare
+_shared = {}         # "live" / "mock" -> the one client of that kind
+
+
+def _client_for(mode):
+    """The shared live client if mode is "live", otherwise the shared mock client."""
+    kind = "live" if mode == "live" else "mock"
+    if kind not in _shared:
+        if kind == "live":
+            from app.drivecarclub import DriveCarClubClient
+            _shared[kind] = DriveCarClubClient()
+        else:
+            from app.mock import MockDriveCarClub
+            _shared[kind] = MockDriveCarClub()
+    return _shared[kind]
 
 
 def get_client():
+    """The client for the booking tools (DCC_MODE)."""
     global _client
     if _client is None:
-        if config.DCC_MODE == "live":
-            from app.drivecarclub import DriveCarClubClient
-            _client = DriveCarClubClient()
-        else:
-            from app.mock import MockDriveCarClub
-            _client = MockDriveCarClub()
+        _client = _client_for(config.DCC_MODE)
     return _client
+
+
+def get_rate_client():
+    """The client for get_fare (DCC_RATE_MODE)."""
+    global _rate_client
+    if _rate_client is None:
+        _rate_client = _client_for(config.DCC_RATE_MODE)
+    return _rate_client
 
 
 def load_current_bookings(mobile):
@@ -504,16 +525,17 @@ def _package_text(package):
     return text
 
 
-def get_fare(arguments):
+def get_fare(arguments, log_details):
     """Look up the standard fares for one car type, trip type and city.
 
-    Returns (result, inputs): "inputs" holds only the inputs that passed the
-    checks, so call_tool can log them safely.
+    Fills "log_details" as it goes, so the log line has it even if
+    DriveCarClub fails: only the inputs that passed the checks, and the
+    "source" of the fares ("live", "cache" or "mock").
     """
     arguments = arguments or {}
 
     # 1. Every input must be given and be plain text.
-    inputs, missing, unclear = {}, [], []
+    inputs, missing, unclear = log_details, [], []
     for field, (_, words) in fares.INPUTS.items():
         raw = arguments.get(field)
         if raw is None or (isinstance(raw, str) and not raw.strip()):
@@ -527,11 +549,11 @@ def get_fare(arguments):
     if missing:
         return _invalid_input_result(
             f"To check the fare, I need to know the {_join_words(missing)}. Could you tell me?"
-        ), inputs
+        )
     if unclear:
         return _invalid_input_result(
             f"Sorry, I didn't understand the {_join_words(unclear)}. Could you tell me again?"
-        ), inputs
+        )
 
     # 2. If DriveCarClub's lists are set, the value must be on them.
     for field, (_, words) in fares.INPUTS.items():
@@ -539,11 +561,13 @@ def get_fare(arguments):
             return _invalid_input_result(
                 f"I can check fares for these options for the {words}: "
                 f"{', '.join(fares.allow_list(field))}. Which one would you like?"
-            ), inputs
+            )
 
     # 3. Ask DriveCarClub (or the 1-hour cache).
-    packages = fares.lookup(
-        get_client(), inputs["car_category"], inputs["service_type"], inputs["city_name"]
+    client = get_rate_client()
+    log_details["source"] = client.source  # if the call fails, it was this one
+    packages, log_details["source"] = fares.lookup(
+        client, inputs["car_category"], inputs["service_type"], inputs["city_name"]
     )
     if not packages:
         return {
@@ -553,7 +577,7 @@ def get_fare(arguments):
                 f"{inputs['service_type']} trip in {inputs['city_name']}. "
                 f"For a quote, {_support_line()}."
             ),
-        }, inputs
+        }
 
     first = packages[0]
     return {
@@ -567,15 +591,15 @@ def get_fare(arguments):
             + f". {config.FARE_NOTE}"
         ),
         "next_step": "Quote these amounts exactly. Never round, add up, estimate or invent a fare.",
-    }, inputs
+    }
 
 
 def _call_fare_tool(name, arguments, caller):
     """Run get_fare and log it. No identity check: fares are not personal."""
     started = time.monotonic()
-    inputs = {}
+    details = {}  # the checked inputs and the source, filled by get_fare
     try:
-        result, inputs = get_fare(arguments)
+        result = get_fare(arguments, details)
     except DCCUnavailable as failure:
         log.alert_perfox_team(
             failure.reason, tool=name, conversation_id=caller.get("conversation_id")
@@ -595,9 +619,10 @@ def _call_fare_tool(name, arguments, caller):
         tool=name,
         conversation_id=caller.get("conversation_id"),
         channel=caller.get("channel"),
-        car_category=inputs.get("car_category"),
-        service_type=inputs.get("service_type"),
-        city_name=inputs.get("city_name"),
+        car_category=details.get("car_category"),
+        service_type=details.get("service_type"),
+        city_name=details.get("city_name"),
+        source=details.get("source"),  # None when the inputs were refused (no lookup)
         outcome=result["outcome"],
         reason=result.get("reason"),
         duration_ms=round((time.monotonic() - started) * 1000),

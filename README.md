@@ -70,7 +70,7 @@ and a small fake DriveCarClub server, so they need no internet or passwords.
 uv run python -m app.server
 ```
 
-- Health check: open http://127.0.0.1:8000/health. You should see `{"ok": true, "mode": "mock"}`.
+- Health check: open http://127.0.0.1:8000/health. You should see `{"ok": true, "mode": "mock", "rate_mode": "mock"}`.
 - Test website: open http://127.0.0.1:8000/ (the page in `web/index.html`). Logging in on the
   page needs HTTPS (the login cookie is `Secure`), so try it on Render. `localhost` also works
   in Chrome and Firefox.
@@ -79,9 +79,21 @@ uv run python -m app.server
   (for example a tunnel such as ngrok while testing, or a hosted server for the pilot).
   Set `HOST=0.0.0.0` in `.env` when the server must accept outside connections.
 
-`DCC_MODE=mock` (the default) uses fake data. `DCC_MODE=live` calls the real DriveCarClub
-API and needs `DCC_USERNAME` and `DCC_PASSWORD`. The mock data uses the same field names
-and formats as the real API, so both modes go through exactly the same mapping.
+There are two DriveCarClub modes, each `mock` (fake data) or `live` (the real API):
+
+| Setting | Controls | Default |
+|---|---|---|
+| `DCC_MODE` | The booking tools: `check_dispatch_status`, `get_chauffeur_details` (and "Your pickups" on the test website) | `mock` |
+| `DCC_RATE_MODE` | `get_fare` only | Empty = the same as `DCC_MODE` |
+
+So, for example, `DCC_MODE=mock` with `DCC_RATE_MODE=live` gives real fares while booking
+lookups stay on mock data. Any `live` mode needs `DCC_USERNAME` and `DCC_PASSWORD`. When
+both are live they share one client, so one token serves both APIs. Any value other than
+`live` counts as `mock` (with a startup warning). The server logs both modes at startup
+(`dcc_modes`), and `/health` shows them as `mode` and `rate_mode`.
+
+The mock data uses the same field names and formats as the real API, so mock and live go
+through exactly the same mapping.
 
 ### DriveCarClub booking fields
 
@@ -285,8 +297,10 @@ back `{"status": "200", "message": "Success", "data": [packages]}`.
 - **Input checks.** Letters, spaces and hyphens only, at most 40 characters. Anything else
   gives `invalid_input`, and DriveCarClub is not called. If an allow-list setting is filled,
   the value must be on it (any upper/lower case).
-- **Cache.** Each (car category, service type, city) answer is kept for 1 hour, in any
-  upper/lower case. Failures are not cached.
+- **Live or mock.** `DCC_RATE_MODE` chooses, separately from the booking tools (section 3).
+- **Cache.** Each (car category, service type, city) answer that found fares is kept for
+  1 hour, in any upper/lower case. `not_found` and failures are not cached, so they are
+  asked again next time.
 
 | Outcome | When | Result |
 |---|---|---|
@@ -296,10 +310,12 @@ back `{"status": "200", "message": "Success", "data": [packages]}`.
 | `unavailable` | API error, `status` not `"200"`, timeout, or rates we can't read | `say` gives the support number; `alert_perfox_team` is logged |
 
 The log line has the tool, the three inputs (only those that passed the checks), the
+`source` of the fares (`live`, `cache` or `mock`; empty when the inputs were refused), the
 outcome and the duration. No phone number is involved.
 
 | Setting (`.env`) | What it does |
 |---|---|
+| `DCC_RATE_MODE` | `mock` or `live` for `get_fare` only. Empty = the same as `DCC_MODE`. |
 | `DCC_RATE_URL` | The GetRate URL (default: the UAT URL) |
 | `FARE_CAR_CATEGORIES`, `FARE_SERVICE_TYPES`, `FARE_CITIES` | Optional allow-lists, comma-separated (for example `Midsize, Premium`). Empty = no check, because DriveCarClub hasn't given us the lists yet. |
 | `FARE_NOTE` | Added to every fare answer. Default: "Tolls, parking and taxes may be extra. For contract rates or an exact quote, please call our customer support team." |

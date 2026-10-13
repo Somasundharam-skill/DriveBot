@@ -10,6 +10,7 @@ import os
 # Settings for the tests. These MUST be set before the app is imported,
 # because config.py reads them once when it is first imported.
 os.environ["DCC_MODE"] = "mock"
+os.environ["DCC_RATE_MODE"] = "mock"  # never call the real GetRate API from tests
 os.environ["MCP_API_KEY"] = "test-key"
 os.environ["TRUST_WEB_PHONE"] = "false"
 os.environ["DCC_TIMEOUT_SECONDS"] = "1"
@@ -25,6 +26,7 @@ import base64
 import json
 import logging
 import re
+import subprocess
 import sys
 import threading
 import time
@@ -37,7 +39,7 @@ from app import browser_sessions, config, fares, identity, otp, sms, tools
 from app.drivecarclub import DriveCarClubClient
 from app.errors import DCCUnavailable, SMSUnavailable
 from app.mapper import INDIA
-from app.server import app
+from app.server import app, log_startup_warnings
 
 # ----------------------------------------------------------------------
 # Tiny test helpers
@@ -155,7 +157,7 @@ check("tools/call returns isError false and text content",
       and response.json()["result"]["content"][0]["type"] == "text")
 
 response = client.get("/health")
-check("health returns ok and mode", response.json() == {"ok": True, "mode": "mock"})
+check("health returns ok and both modes", response.json() == {"ok": True, "mode": "mock", "rate_mode": "mock"})
 
 # ----------------------------------------------------------------------
 # 2. check_dispatch_status (SOP 5)
@@ -962,7 +964,8 @@ fare_logs = [json.loads(line) for line in log_lines if '"tool_call"' in line]
 check("log has tool, the three inputs, outcome and duration",
       fare_logs and fare_logs[0]["tool"] == "get_fare" and fare_logs[0]["car_category"] == "Midsize"
       and fare_logs[0]["service_type"] == "Local" and fare_logs[0]["city_name"] == "Gurugram"
-      and fare_logs[0]["outcome"] == "found" and "duration_ms" in fare_logs[0], fare_logs)
+      and fare_logs[0]["outcome"] == "found" and "duration_ms" in fare_logs[0]
+      and fare_logs[0]["source"] == "mock", fare_logs)
 
 result, text = fare(service_type="Outstation")
 package = (result.get("packages") or [{}])[0]
@@ -982,8 +985,8 @@ check("missing city -> invalid_input asking for the city",
       result["outcome"] == "invalid_input" and "city" in result["say"], text)
 
 # The live client against the fake GetRate API.
-saved_client = tools._client
-tools._client = live_client()
+saved_rate_client = tools._rate_client
+tools._rate_client = live_client()  # get_fare uses the rate client
 fares.clear_cache()
 log_lines.clear()
 
@@ -1027,7 +1030,96 @@ check("allow-list rejection -> no API call", counts["rates"] == calls_before, co
 result, text = fare(city_name="gurugram")
 check("allow-list set -> city on it (any case) is found", result["outcome"] == "found", text)
 config.FARE_CITIES = []
-tools._client = saved_client
+tools._rate_client = saved_rate_client
+
+# ----------------------------------------------------------------------
+# 11. Separate modes: DCC_MODE (bookings) and DCC_RATE_MODE (fares)
+# ----------------------------------------------------------------------
+print("\n--- DCC_MODE and DCC_RATE_MODE ---")
+
+# Point the "live" settings at the fake DriveCarClub server.
+saved_settings = {name: getattr(config, name) for name in (
+    "DCC_MODE", "DCC_RATE_MODE", "DCC_TOKEN_URL", "DCC_BOOKING_URL", "DCC_RATE_URL",
+    "DCC_USERNAME", "DCC_PASSWORD", "DCC_TIMEOUT_SECONDS")}
+config.DCC_TOKEN_URL = base_url + "/token"
+config.DCC_BOOKING_URL = base_url + "/bookings"
+config.DCC_RATE_URL = base_url + "/rates"
+config.DCC_USERNAME, config.DCC_PASSWORD = "uat-user", "uat-pass"
+config.DCC_TIMEOUT_SECONDS = 2
+
+
+def use_modes(booking_mode, rate_mode):
+    """Switch modes as if the server had restarted with these settings."""
+    config.DCC_MODE, config.DCC_RATE_MODE = booking_mode, rate_mode
+    tools._client = tools._rate_client = None
+    tools._shared.clear()
+    fares.clear_cache()
+
+
+def fare_sources():
+    """The "source" of every get_fare log line since log_lines was cleared."""
+    return [json.loads(line)["source"] for line in log_lines if '"get_fare"' in line and '"tool_call"' in line]
+
+
+# Fares live, bookings mock.
+use_modes("mock", "live")
+log_lines.clear()
+before = dict(counts)
+result, text = call("check_dispatch_status", phone="919000000001")
+check("fares live: bookings still come from mock data",
+      result["outcome"] == "one" and result["booking"]["booking_ref"] == "DCC100101"
+      and counts["bookings"] == before["bookings"], text)
+result, text = fare()
+check("fares live: get_fare calls the real (fake) GetRate API",
+      result["outcome"] == "found" and counts["rates"] == before["rates"] + 1, text)
+fare()
+check("fares live: second question comes from the cache", counts["rates"] == before["rates"] + 1, counts)
+check("log source: 'live' then 'cache'", fare_sources() == ["live", "cache"], fare_sources())
+fare(city_name="Nowhere")
+result, text = fare(city_name="Nowhere")
+check("not_found is not cached (asked again)",
+      result["outcome"] == "not_found" and counts["rates"] == before["rates"] + 3, counts)
+
+# The reverse: bookings live, fares mock.
+use_modes("live", "mock")
+log_lines.clear()
+before = dict(counts)
+result, text = call("check_dispatch_status", phone="919000000001")
+check("bookings live: check_dispatch_status calls the real (fake) API",
+      result["outcome"] == "one" and result["booking"]["booking_ref"] == "LIVE1"
+      and counts["bookings"] > before["bookings"], text)
+result, text = fare()
+check("bookings live: get_fare still uses mock fares",
+      result["outcome"] == "found" and counts["rates"] == before["rates"], text)
+check("log source: 'mock'", fare_sources() == ["mock"], fare_sources())
+
+# Both live: one shared client, so one token for both APIs.
+use_modes("live", "live")
+before = dict(counts)
+call("check_dispatch_status", phone="919000000001")
+fare()
+check("both live: the booking tools and get_fare share one client",
+      tools.get_client() is tools.get_rate_client())
+check("both live: one token used for both APIs", counts["token"] == before["token"] + 1, counts)
+
+for name, value in saved_settings.items():
+    setattr(config, name, value)
+use_modes(config.DCC_MODE, config.DCC_RATE_MODE)
+
+# DCC_RATE_MODE defaults to DCC_MODE (checked in a fresh Python, since
+# settings are read once at import).
+default_check = subprocess.run(
+    [sys.executable, "-c", "from app import config; print(config.DCC_MODE, config.DCC_RATE_MODE)"],
+    env={**os.environ, "DCC_MODE": "live", "DCC_RATE_MODE": ""}, capture_output=True, text=True,
+)
+check("DCC_RATE_MODE empty -> same as DCC_MODE", default_check.stdout.split() == ["live", "live"],
+      default_check.stdout + default_check.stderr)
+
+log_lines.clear()
+log_startup_warnings()
+mode_logs = [json.loads(line) for line in log_lines if '"dcc_modes"' in line]
+check("startup logs both modes",
+      mode_logs and mode_logs[0]["booking_mode"] == "mock" and mode_logs[0]["rate_mode"] == "mock", mode_logs)
 
 fake_server.shutdown()
 

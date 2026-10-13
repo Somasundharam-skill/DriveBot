@@ -135,8 +135,12 @@ def tool_list_for_perfox():
 
 @app.get("/health")
 def health():
-    mode = "live" if config.DCC_MODE == "live" else "mock"
-    return {"ok": True, "mode": mode}
+    return {"ok": True, "mode": _mode(config.DCC_MODE), "rate_mode": _mode(config.DCC_RATE_MODE)}
+
+
+def _mode(value):
+    """The mode actually used: "live" only if set to exactly that."""
+    return "live" if value == "live" else "mock"
 
 
 @app.post("/mcp")
@@ -200,10 +204,14 @@ def log_startup_warnings():
         log.warning("no_api_key", note="MCP_API_KEY is empty: ALL requests are allowed. Local testing only!")
     if config.TRUST_WEB_PHONE:
         log.warning("trust_web_phone_on", note="TRUST_WEB_PHONE=true: web chat numbers are trusted without OTP. Development only!")
-    if config.DCC_MODE not in ("mock", "live"):
-        log.warning("unknown_dcc_mode", note=f"DCC_MODE={config.DCC_MODE!r} is not mock or live; using mock.")
-    if config.DCC_MODE == "live" and not (config.DCC_USERNAME and config.DCC_PASSWORD):
-        log.warning("missing_dcc_credentials", note="DCC_MODE=live but DCC_USERNAME or DCC_PASSWORD is empty.")
+    # Which DriveCarClub data each tool uses (bookings and fares are separate).
+    log.info("dcc_modes", booking_mode=_mode(config.DCC_MODE), rate_mode=_mode(config.DCC_RATE_MODE))
+    for name, value in (("DCC_MODE", config.DCC_MODE), ("DCC_RATE_MODE", config.DCC_RATE_MODE)):
+        if value not in ("mock", "live"):
+            log.warning("unknown_dcc_mode", note=f"{name}={value!r} is not mock or live; using mock.")
+    if "live" in (config.DCC_MODE, config.DCC_RATE_MODE) and not (config.DCC_USERNAME and config.DCC_PASSWORD):
+        log.warning("missing_dcc_credentials",
+                    note="DCC_MODE or DCC_RATE_MODE is live but DCC_USERNAME or DCC_PASSWORD is empty.")
     if config.INCLUDE_PAST_BOOKINGS:
         log.warning("include_past_bookings_on", note="INCLUDE_PAST_BOOKINGS=true: past pickups are shown. UAT testing only!")
     if config.PICKUP_AREA_FIELD not in config.PICKUP_AREA_CHOICES:
@@ -225,5 +233,6 @@ log_startup_warnings()
 website.serve_static_files(app)
 
 if __name__ == "__main__":
-    log.info("server_starting", host=config.HOST, port=config.PORT, mode=config.DCC_MODE)
+    log.info("server_starting", host=config.HOST, port=config.PORT,
+             mode=_mode(config.DCC_MODE), rate_mode=_mode(config.DCC_RATE_MODE))
     uvicorn.run(app, host=config.HOST, port=config.PORT)

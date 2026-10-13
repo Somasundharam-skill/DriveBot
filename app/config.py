@@ -53,7 +53,12 @@ KEEP_ALIVE_SECONDS = _number("KEEP_ALIVE_SECONDS", 300)  # every 5 minutes
 ENABLE_DOCS = _yes_no("ENABLE_DOCS")
 
 # --- DriveCarClub API --------------------------------------------------
-DCC_MODE = _text("DCC_MODE", "mock").lower()  # "mock" or "live"
+# "mock" or "live". Anything else counts as "mock" (with a startup warning).
+# DCC_MODE is for the booking tools (check_dispatch_status, get_chauffeur_details).
+DCC_MODE = _text("DCC_MODE", "mock").lower()
+# DCC_RATE_MODE is for get_fare only. Empty = the same as DCC_MODE. So fares
+# can use the real API while booking lookups stay on mock data.
+DCC_RATE_MODE = (_text("DCC_RATE_MODE") or DCC_MODE).lower()
 DCC_TOKEN_URL = _text(
     "DCC_TOKEN_URL", "https://drivecarclub.com/CarclubCRMUAT/api/auth/Token"
 )

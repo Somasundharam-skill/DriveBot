@@ -1,4 +1,4 @@
-"""Talks to the real DriveCarClub API (used when DCC_MODE=live).
+"""Talks to the real DriveCarClub API (used when DCC_MODE or DCC_RATE_MODE is live).
 
 Three calls (see the API reference in the SOP document):
   1. Token API: sign in with HTTP Basic auth and get an access token.
@@ -26,6 +26,8 @@ TOKEN_KEYS = ["access_token", "token", "Token", "AccessToken"]
 
 
 class DriveCarClubClient:
+    source = "live"  # shown in the get_fare log line
+
     def __init__(
         self,
         token_url=None,

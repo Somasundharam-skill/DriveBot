@@ -1,4 +1,4 @@
-"""Fake DriveCarClub data for testing (used when DCC_MODE=mock).
+"""Fake DriveCarClub data for testing (used when DCC_MODE or DCC_RATE_MODE is mock).
 
 It works exactly like the live client: get_bookings(contact_no) returns
 a list of raw bookings, or raises DCCUnavailable. The raw bookings use
@@ -121,6 +121,8 @@ _RATES = {
 
 class MockDriveCarClub:
     """Same interface as DriveCarClubClient, but with fake data."""
+
+    source = "mock"  # shown in the get_fare log line
 
     def get_bookings(self, contact_no):
         if contact_no == "919000000005":
