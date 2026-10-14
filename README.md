@@ -320,9 +320,14 @@ websites can't post with a customer's cookie (CSRF protection).
    `INCLUDE_PAST_BOOKINGS=true` (UAT testing) shows past pickups.
 5. **"Allocated"** means the booking has both a chauffeur name and a registration number.
 6. **Never guess.** If DriveCarClub fails (sign-in fails, 401 twice, 5xx, network error or
-   timeout) the tool returns `unavailable`, DriveBot gives the support number, and the server
+   timeout) the tool returns `unavailable`, DriveBot points to customer support, and the server
    logs an `alert_perfox_team` line.
-7. **Careful logging.** One JSON line per tool call, with the mobile masked (`91******3210`).
+7. **No support number on the server.** The customer support number lives only in the
+   Perfox knowledge base. Where a tool's `say` sends the customer to support, it contains
+   `[share the customer support number from the knowledge base]`, and every tool description
+   tells the AI to fill that in from the knowledge base. No tool result or log line has a
+   support phone number. The test website just says "Please call our customer support team."
+8. **Careful logging.** One JSON line per tool call, with the mobile masked (`91******3210`).
    Full numbers, tokens and passwords are never logged.
 
 Every tool result has an `outcome` (a fixed code) and a `say` field with the SOP wording
@@ -350,9 +355,9 @@ back `{"status": "200", "message": "Success", "data": [packages]}`.
 | Outcome | When | Result |
 |---|---|---|
 | `found` | DriveCarClub has rates | `packages`: `package_name`, `service_type`, `car_category`, `city`, `rate_inr`, `extra_km_rate_inr`, `extra_hour_rate_inr`, plus `outstation_allowance_inr` and `night_stay_inr` only when above 0. Amounts are numbers. `say` quotes them exactly as standard rates, followed by `FARE_NOTE`. |
-| `not_found` | Empty `data` list | `say` explains no rate was found and gives the support number. Never a guessed fare. |
+| `not_found` | Empty `data` list | `say` explains no rate was found and points to customer support. Never a guessed fare. |
 | `invalid_input` | Missing, not plain text, too long, or not on an allow-list | `say` asks for the detail again |
-| `unavailable` | API error, `status` not `"200"`, timeout, or rates we can't read | `say` gives the support number; `alert_perfox_team` is logged |
+| `unavailable` | API error, `status` not `"200"`, timeout, or rates we can't read | `say` points to customer support; `alert_perfox_team` is logged |
 
 The log line has the tool, the three inputs (only those that passed the checks), the
 `source` of the fares (`live`, `cache` or `mock`; empty when the inputs were refused), the
@@ -404,7 +409,6 @@ These are guesses in the code today. Each one is easy to change when the answer 
 | Error codes and messages (for example, is "no bookings" a 404?) | Anything except 200 counts as a failure | `app/drivecarclub.py` |
 | Production URLs, credentials and rate limits | UAT URLs | `DCC_TOKEN_URL`, `DCC_BOOKING_URL` in `.env` |
 | Share the chauffeur's mobile? (SOP 6 open item 2) | No | `SHARE_CHAUFFEUR_MOBILE` in `app/config.py` |
-| Customer support number | Placeholder text | `SUPPORT_NUMBER` in `.env` |
 | Approved SMS template and sender ID for the OTP | Text from the brief | `OTP_SMS_TEXT`, `PLIVO_SENDER_ID` in `.env` |
 
 ## 9. Good to know

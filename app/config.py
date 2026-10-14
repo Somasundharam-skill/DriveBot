@@ -125,9 +125,6 @@ PLIVO_SENDER_ID = _text("PLIVO_SENDER_ID")
 #          in place, so switching back is just VERIFICATION_MODE=otp.
 VERIFICATION_MODE = _text("VERIFICATION_MODE", "otp").lower()
 
-# --- Customer-facing ---------------------------------------------------
-SUPPORT_NUMBER = _text("SUPPORT_NUMBER", "[customer support number]")
-
 # Development only: trust the phone number on website chat without OTP.
 TRUST_WEB_PHONE = _yes_no("TRUST_WEB_PHONE")
 

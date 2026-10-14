@@ -61,11 +61,13 @@ def check(name, condition, detail=""):
 # Catch the server's log lines in a list (instead of printing them), so
 # we can check what gets logged.
 log_lines = []
+all_log_lines = []  # never cleared: every log line of the whole run
 
 
 class ListHandler(logging.Handler):
     def emit(self, record):
         log_lines.append(record.getMessage())
+        all_log_lines.append(record.getMessage())
 
 
 drivebot_logger = logging.getLogger("drivebot")
@@ -96,7 +98,11 @@ def call(tool, arguments=None, phone=None, channel="phone", conversation_id="con
         headers["X-Sa-User-Token"] = user_token  # our website's chat_token, via Perfox
     response = rpc("tools/call", {"name": tool, "arguments": arguments or {}}, headers)
     text = response.json()["result"]["content"][0]["text"]
+    all_tool_texts.append(text)
     return json.loads(text), text
+
+
+all_tool_texts = []  # every tool result of the whole run
 
 
 def contains_none(text, words):
@@ -197,6 +203,9 @@ result, text = call("check_dispatch_status", phone="919000000003")
 check("no bookings -> outcome 'none'", result["outcome"] == "none", text)
 check("none -> SOP wording", result["say"].startswith("I can't see a car sent for this number yet."))
 check("none -> offers support number", "customer support" in result["say"])
+check("none -> support number left to the knowledge base",
+      tools.SUPPORT_PLACEHOLDER in result["say"] and "share the customer support number from the knowledge base"
+      in result["say"], result["say"])
 
 result, text = call("check_dispatch_status", phone="919000000004")
 check("not allocated booking -> 'one' with chauffeur_allocated false",
@@ -1253,6 +1262,30 @@ check("startup logs both modes",
       mode_logs and mode_logs[0]["booking_mode"] == "mock" and mode_logs[0]["rate_mode"] == "mock", mode_logs)
 
 fake_server.shutdown()
+
+# ----------------------------------------------------------------------
+# 12. No support number on the server (it lives in the Perfox knowledge base)
+# ----------------------------------------------------------------------
+print("\n--- support number ---")
+
+
+def has_support_number(text):
+    """True if a support sentence has digits in it, or the old placeholder."""
+    return bool(re.search(r"customer support[^.\"]*\d", text)) or "[customer support number]" in text
+
+
+check("SUPPORT_NUMBER setting is gone", not hasattr(config, "SUPPORT_NUMBER"))
+check("every tool description says to take the number from the knowledge base",
+      all("support number from your knowledge base" in t["description"] for t in tools.TOOLS))
+# Where a number used to be ("...support team on <number>"). FARE_NOTE only
+# says "call our customer support team", with no number, so it isn't one.
+support_texts = [t for t in all_tool_texts if "customer support team on" in t]
+check("support answers were checked", len(support_texts) > 10, len(support_texts))
+check("support answers use the knowledge-base placeholder",
+      all(f"customer support team on {tools.SUPPORT_PLACEHOLDER}" in t for t in support_texts))
+check("no tool result has a support phone number", not any(has_support_number(t) for t in all_tool_texts))
+check("no log line has a support phone number", not any(has_support_number(line) for line in all_log_lines))
+check("no website reply has a support phone number", not any(has_support_number(t) for t in web_replies))
 
 # ----------------------------------------------------------------------
 print(f"\n{results['pass']} passed, {results['fail']} failed")

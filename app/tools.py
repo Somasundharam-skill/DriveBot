@@ -28,6 +28,19 @@ from app import browser_sessions, config, fares, identity, log, mapper, otp
 from app.errors import DCCUnavailable, SMSUnavailable
 
 # ----------------------------------------------------------------------
+# The customer support number is NOT kept on this server: it lives only in
+# the Perfox knowledge base. Where a "say" text sends the customer to
+# support, it has this placeholder, and every tool description tells the
+# AI to fill it in from the knowledge base. So no tool result or log line
+# ever has a support phone number in it.
+# ----------------------------------------------------------------------
+SUPPORT_PLACEHOLDER = "[share the customer support number from the knowledge base]"
+SUPPORT_HINT = (
+    f" Where 'say' contains {SUPPORT_PLACEHOLDER}, replace it with the customer "
+    "support number from your knowledge base; never make a number up."
+)
+
+# ----------------------------------------------------------------------
 # Tool definitions shown to the AI (tools/list).
 # The descriptions tell the AI what each tool does AND when to call it.
 # ----------------------------------------------------------------------
@@ -49,6 +62,7 @@ TOOLS = [
             "time and area, then use that booking's booking_ref. If the outcome is "
             "'verification_needed' (website chat), ask for their mobile number and call "
             "send_otp with it."
+            + SUPPORT_HINT
         ),
         "input_schema": {
             "type": "object",
@@ -71,6 +85,7 @@ TOOLS = [
             "'shared', share exactly these details and nothing more. Never share details "
             "of any other driver or booking. If the outcome is 'verification_needed' "
             "(website chat), ask for their mobile number and call send_otp with it."
+            + SUPPORT_HINT
         ),
         "input_schema": {
             "type": "object",
@@ -98,6 +113,7 @@ TOOLS = [
             "what 'say' says, in their language. When the outcome is 'sent', wait for the "
             "customer to tell you the code, then call verify_otp. You never see the code "
             "yourself."
+            + SUPPORT_HINT
         ),
         "input_schema": {
             "type": "object",
@@ -123,6 +139,7 @@ TOOLS = [
             "or get_chauffeur_details). If 'wrong_code', ask them to check the code and try "
             "again. If 'expired', offer to send a new code with send_otp. If 'locked', do "
             "not try again; give the customer support number."
+            + SUPPORT_HINT
         ),
         "input_schema": {
             "type": "object",
@@ -149,6 +166,7 @@ TOOLS = [
             "says, in their language. When the outcome is 'ok', call the tool the customer "
             "needed again (check_dispatch_status or get_chauffeur_details). If "
             "'invalid_number', ask them to check the number and tell you again."
+            + SUPPORT_HINT
         ),
         "input_schema": {
             "type": "object",
@@ -178,6 +196,7 @@ TOOLS = [
             "says, in their language. Quote the amounts exactly as given; never round, add "
             "up, estimate or invent a fare. If the outcome is 'invalid_input', ask the "
             "customer for the details 'say' mentions and call get_fare again."
+            + SUPPORT_HINT
         ),
         "input_schema": {
             "type": "object",
@@ -236,7 +255,7 @@ def listed_tools():
 
 
 def _support_line():
-    return f"please call our customer support team on {config.SUPPORT_NUMBER}"
+    return f"please call our customer support team on {SUPPORT_PLACEHOLDER}"
 
 
 def _verification_needed_result():

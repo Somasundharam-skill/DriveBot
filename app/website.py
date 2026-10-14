@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import browser_sessions, config, identity, log, mapper, otp, tools
+from app import browser_sessions, identity, log, mapper, otp, tools
 from app.errors import DCCUnavailable, SMSUnavailable
 
 COOKIE_NAME = "dcc_sid"
@@ -85,7 +85,9 @@ def _reply(body, status=200, set_sid=None):
 
 
 def _support_text():
-    return f"Please call our customer support team on {config.SUPPORT_NUMBER}."
+    # Shown on the page as is. The support number is not kept on this
+    # server (it lives in the Perfox knowledge base), so none is given here.
+    return "Please call our customer support team."
 
 
 # ----------------------------------------------------------------------
