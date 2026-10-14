@@ -117,6 +117,14 @@ PLIVO_AUTH_ID = _text("PLIVO_AUTH_ID")
 PLIVO_AUTH_TOKEN = _text("PLIVO_AUTH_TOKEN")
 PLIVO_SENDER_ID = _text("PLIVO_SENDER_ID")
 
+# --- Verification on website chat --------------------------------------
+# "otp"  = the customer proves their number with a code (default).
+# "none" = UAT DEMOS ONLY: no code, the number the customer types is
+#          trusted. The server refuses to start with "none" unless
+#          DCC_BOOKING_URL is a UAT URL (see server.py). The OTP code stays
+#          in place, so switching back is just VERIFICATION_MODE=otp.
+VERIFICATION_MODE = _text("VERIFICATION_MODE", "otp").lower()
+
 # --- Customer-facing ---------------------------------------------------
 SUPPORT_NUMBER = _text("SUPPORT_NUMBER", "[customer support number]")
 

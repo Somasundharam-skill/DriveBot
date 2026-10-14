@@ -15,6 +15,8 @@ os.environ["MCP_API_KEY"] = "test-key"
 os.environ["TRUST_WEB_PHONE"] = "false"
 os.environ["DCC_TIMEOUT_SECONDS"] = "1"
 os.environ["OTP_MODE"] = "mock"  # no SMS; the code is always 123456
+os.environ["VERIFICATION_MODE"] = "otp"  # the default; one section switches it to "none"
+os.environ["DCC_BOOKING_URL"] = "https://drivecarclub.com/CarclubCRMUAT/Api/Home/DespatchedBooking"
 os.environ["KEEP_ALIVE_URL"] = ""  # never ping the real server from tests
 os.environ["ENABLE_DOCS"] = "false"
 os.environ["INCLUDE_PAST_BOOKINGS"] = "false"  # the default; one test switches it on
@@ -661,6 +663,135 @@ check("no full mobile, code, cookie or token in any log line",
       all("9000000001" not in line and "9000000002" not in line and MOCK_CODE not in line
           and all(secret not in line for secret in all_cookies + all_tokens)
           for line in log_lines))
+
+# ----------------------------------------------------------------------
+# 6b. VERIFICATION_MODE: "otp" (default) and "none" (UAT demos only)
+# ----------------------------------------------------------------------
+print("\n--- VERIFICATION_MODE ---")
+
+
+def listed_names():
+    return {t["name"] for t in rpc("tools/list").json()["result"]["tools"]}
+
+
+# "otp" (the default): as before.
+check("VERIFICATION_MODE is otp by default", config.VERIFICATION_MODE == "otp")
+check("otp: use_mobile_number is not listed", "use_mobile_number" not in listed_names())
+result, text = call("use_mobile_number", {"mobile_number": "9000000001"}, channel="web", conversation_id="vm-otp")
+check("otp: use_mobile_number -> not_available", result["outcome"] == "not_available", text)
+check("otp: ...and the number is not trusted", identity.get_session("vm-otp")["verified_mobile"] is None)
+browser_g = browser()
+check("otp: /api/session says verification 'otp'",
+      site_get(browser_g, "/api/session").json().get("verification") == "otp")
+response = site_post(browser_g, "/api/login", {"mobile": "9000000001"})
+check("otp: POST /api/login -> 404", response.status_code == 404, response.text)
+check("otp: ...and not signed in", site_get(browser_g, "/api/session").json()["signed_in"] is False)
+check("page: switches to the one-step login when verification is 'none'",
+      'now.verification === "none"' in page and 'postJSON("/api/login",' in page and 'id="code-test-hint"' in page)
+
+# "none": no OTP anywhere.
+config.VERIFICATION_MODE = "none"
+names = listed_names()
+check("none: send_otp and verify_otp are not listed",
+      "send_otp" not in names and "verify_otp" not in names, names)
+check("none: use_mobile_number is listed", "use_mobile_number" in names, names)
+dispatch_tool = next(t for t in rpc("tools/list").json()["result"]["tools"] if t["name"] == "check_dispatch_status")
+check("none: booking tool description points to use_mobile_number, not send_otp",
+      "use_mobile_number" in dispatch_tool["description"] and "send_otp" not in dispatch_tool["description"])
+
+result, text = call("check_dispatch_status", channel="web", conversation_id="vm-none")
+check("none: web chat without a number -> verification_needed", result["outcome"] == "verification_needed", text)
+check("none: verification_needed asks for the number and points to use_mobile_number",
+      "mobile number" in result["say"] and "use_mobile_number" in result.get("next_step", "")
+      and "code" not in result["say"], text)
+result, text = call("use_mobile_number", {"mobile_number": "+91 90000 00001"}, channel="web", conversation_id="vm-none")
+check("none: use_mobile_number -> ok", result["outcome"] == "ok", text)
+check("none: ok -> does not read the number back", "90000" not in text and "0001" not in text, text)
+result, text = call("check_dispatch_status", channel="web", conversation_id="vm-none")
+check("none: use_mobile_number then check_dispatch_status -> 'one'", result["outcome"] == "one", text)
+
+result, text = call("use_mobile_number", {"mobile_number": "12345"}, channel="web", conversation_id="vm-invalid")
+check("none: use_mobile_number with an invalid number -> invalid_number",
+      result["outcome"] == "invalid_number", text)
+check("none: ...and nothing is trusted", identity.get_session("vm-invalid")["verified_mobile"] is None)
+
+result, text = call("send_otp", {"mobile_number": "9000000001"}, channel="web", conversation_id="vm-none-otp")
+check("none: send_otp if called anyway -> not_available", result["outcome"] == "not_available", text)
+
+# Phone, WhatsApp and SMS: the Perfox number only, never a typed one.
+result, text = call("use_mobile_number", {"mobile_number": "9000000001"}, phone="919000000003",
+                    channel="whatsapp", conversation_id="vm-wa")
+check("none: use_mobile_number on whatsapp -> not_needed", result["outcome"] == "not_needed", text)
+result, text = call("check_dispatch_status", phone="919000000003", channel="whatsapp", conversation_id="vm-wa")
+check("none: whatsapp still uses the Perfox number", result["outcome"] == "none", text)
+
+# Website one-step login, then the chat needs no number.
+browser_h = browser()
+session_h = site_get(browser_h, "/api/session").json()
+check("none: /api/session says verification 'none'", session_h.get("verification") == "none", session_h)
+response = site_post(browser_h, "/api/login/send-code", {"mobile": "9000000001"})
+check("none: /api/login/send-code -> 404", response.status_code == 404, response.text)
+response = site_post(browser_h, "/api/login/verify", {"code": MOCK_CODE})
+check("none: /api/login/verify -> 404", response.status_code == 404, response.text)
+response = site_post(browser_h, "/api/login", {"mobile": "12345"})
+check("none: /api/login with an invalid number -> 400 invalid_number",
+      response.status_code == 400 and response.json()["outcome"] == "invalid_number", response.text)
+response = site_post(browser_h, "/api/login", {"mobile": "9000000001"}, headers={"Origin": "https://evil.example"})
+check("none: /api/login from a foreign Origin -> 403", response.status_code == 403)
+old_sid_h = sid_of(browser_h)
+response = site_post(browser_h, "/api/login", {"mobile": "90000 00001"})
+check("none: /api/login -> signed in straight away",
+      response.status_code == 200 and response.json()["signed_in"] is True, response.text)
+check("none: cookie value changes after logging in", sid_of(browser_h) and sid_of(browser_h) != old_sid_h)
+session_h2 = site_get(browser_h, "/api/session").json()
+check("none: /api/session shows the masked mobile and the same chat_token",
+      session_h2["signed_in"] is True and session_h2["masked_mobile"] == "••••0001"
+      and session_h2["chat_token"] == session_h["chat_token"], session_h2)
+result, text = call("check_dispatch_status", channel="web", conversation_id="vm-site",
+                    user_token=session_h2["chat_token"])
+check("none: after website login the chat needs no number", result["outcome"] == "one", text)
+
+# A chat use_mobile_number signs in the matching browser session only.
+browser_i, browser_j = browser(), browser()
+token_i = site_get(browser_i, "/api/session").json()["chat_token"]
+site_get(browser_j, "/api/session")
+result, text = call("use_mobile_number", {"mobile_number": "9000000002"}, channel="web",
+                    conversation_id="vm-chat", user_token=token_i)
+check("none: chat use_mobile_number with a website token -> ok", result["outcome"] == "ok", text)
+session_i = site_get(browser_i, "/api/session").json()
+check("none: ...that browser is signed in",
+      session_i["signed_in"] is True and session_i["masked_mobile"] == "••••0002", session_i)
+check("none: ...another browser stays signed out", site_get(browser_j, "/api/session").json()["signed_in"] is False)
+
+# Logout still works: the old token can't be signed in again from the chat.
+site_post(browser_i, "/api/logout")
+result, text = call("use_mobile_number", {"mobile_number": "9000000002"}, channel="web",
+                    conversation_id="vm-chat", user_token=token_i)
+check("none: use_mobile_number with an old token -> session_ended", result["outcome"] == "session_ended", text)
+
+log_lines.clear()
+log_startup_warnings()
+check("none: startup logs the 'Verification is OFF' warning",
+      any('"verification_off"' in line and "Verification is OFF: anyone can check any number's bookings. "
+          "UAT demo only." in line for line in log_lines), log_lines)
+config.VERIFICATION_MODE = "otp"
+
+
+# The safety lock, checked in a fresh Python (settings are read once at import).
+def start_server(**settings):
+    return subprocess.run([sys.executable, "-c", "import app.server"],
+                          env={**os.environ, **settings}, capture_output=True, text=True)
+
+
+PROD_URL = "https://drivecarclub.com/CarclubCRM/Api/Home/DespatchedBooking"
+started = start_server(VERIFICATION_MODE="none", DCC_BOOKING_URL=PROD_URL)
+check("none + non-UAT booking URL -> the server refuses to start",
+      started.returncode != 0 and "Refusing to start" in started.stderr, started.stdout + started.stderr)
+started = start_server(VERIFICATION_MODE="none", DCC_BOOKING_URL=PROD_URL.replace("CRM", "crmuat"))
+check("none + UAT booking URL (any case) -> starts, with the warning",
+      started.returncode == 0 and "Verification is OFF" in started.stdout, started.stdout + started.stderr)
+started = start_server(VERIFICATION_MODE="otp", DCC_BOOKING_URL=PROD_URL)
+check("otp + non-UAT booking URL -> starts", started.returncode == 0, started.stdout + started.stderr)
 
 # ----------------------------------------------------------------------
 # 7. Logging

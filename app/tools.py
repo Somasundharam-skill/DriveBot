@@ -3,7 +3,12 @@
   check_dispatch_status   SOP 5: "Has my car been sent?"
   get_chauffeur_details   SOP 6: "Who is my chauffeur, which car?"
   send_otp, verify_otp    SOP 5 rule 1: prove the number on website chat
+  use_mobile_number       UAT DEMOS ONLY (VERIFICATION_MODE=none): the typed
+                          number is trusted without a code
   get_fare                "How much does a car cost?" (standard rates)
+
+Which tools are listed depends on VERIFICATION_MODE (see listed_tools):
+"otp" lists send_otp and verify_otp, "none" lists use_mobile_number.
 
 Every tool returns a dict with:
   "outcome"  a fixed code the AI can rely on
@@ -132,6 +137,33 @@ TOOLS = [
         },
     },
     {
+        # Only listed when VERIFICATION_MODE=none (UAT demos).
+        "name": "use_mobile_number",
+        "description": (
+            "Website chat only. Uses the customer's own mobile number to look up their "
+            "bookings. Call this ONLY after check_dispatch_status or get_chauffeur_details "
+            "returned 'verification_needed' and you have asked the customer for their own "
+            "mobile number. Never read the number back to the customer and never guess or "
+            "invent one. The result has an 'outcome' (ok, invalid_number, not_needed, "
+            "session_ended, not_available) and a 'say' field: tell the customer what 'say' "
+            "says, in their language. When the outcome is 'ok', call the tool the customer "
+            "needed again (check_dispatch_status or get_chauffeur_details). If "
+            "'invalid_number', ask them to check the number and tell you again."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "mobile_number": {
+                    "type": "string",
+                    "description": "The customer's own Indian mobile number exactly as they typed it "
+                    "(for example 98765 43210 or +91 98765 43210).",
+                }
+            },
+            "required": ["mobile_number"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "get_fare",
         "description": (
             "Gets DriveCarClub's standard fares (rate packages) for a type of car, a type of "
@@ -171,7 +203,32 @@ TOOLS = [
 
 BOOKING_TOOLS = ("check_dispatch_status", "get_chauffeur_details")
 OTP_TOOLS = ("send_otp", "verify_otp")
+NO_OTP_TOOLS = ("use_mobile_number",)  # VERIFICATION_MODE=none only
 FARE_TOOLS = ("get_fare",)
+
+
+def listed_tools():
+    """The tools to show in tools/list for the current VERIFICATION_MODE.
+
+    "otp":  everything except use_mobile_number (as before).
+    "none": no send_otp or verify_otp; use_mobile_number instead, and the
+            booking tools point to it instead of send_otp.
+    """
+    if not identity.verification_off():
+        return [tool for tool in TOOLS if tool["name"] not in NO_OTP_TOOLS]
+
+    listed = []
+    for tool in TOOLS:
+        if tool["name"] in OTP_TOOLS:
+            continue
+        if tool["name"] in BOOKING_TOOLS:
+            description = tool["description"].replace(
+                "call send_otp with it", "call use_mobile_number with it"
+            )
+            tool = {**tool, "description": description}
+        listed.append(tool)
+    return listed
+
 
 # ----------------------------------------------------------------------
 # Wording shared by both tools.
@@ -183,6 +240,19 @@ def _support_line():
 
 
 def _verification_needed_result():
+    if identity.verification_off():
+        # UAT demos: no code, just ask for the number.
+        return {
+            "outcome": "verification_needed",
+            "say": (
+                "To look up your booking, I need your mobile number. "
+                "Please tell me the mobile number you booked with."
+            ),
+            "next_step": (
+                "When the customer gives their own mobile number, call use_mobile_number "
+                "with it. Never read the number back to them."
+            ),
+        }
     return {
         "outcome": "verification_needed",
         "say": (
@@ -485,7 +555,62 @@ def verify_otp(caller, code):
 
 
 # ----------------------------------------------------------------------
-# Tool 5: get_fare (standard fares from the GetRate API)
+# Tool 5: use_mobile_number (UAT DEMOS ONLY, VERIFICATION_MODE=none)
+# Website chat with no OTP: the typed number is trusted straight away.
+# ----------------------------------------------------------------------
+
+
+def _not_available_result():
+    """For a tool that isn't listed in this VERIFICATION_MODE."""
+    return {
+        "outcome": "not_available",
+        "say": f"I'm sorry, I can't do that here. For help with your booking, {_support_line()}.",
+    }
+
+
+def use_mobile_number(caller, mobile_number):
+    """Trust the number the customer typed (no code).
+
+    Returns (result, mobile) so call_tool can log the masked number.
+    """
+    if not identity.verification_off():
+        return _not_available_result(), None
+    # Phone, WhatsApp and SMS always use the number from Perfox: a typed
+    # number is never used there.
+    if not _is_web(caller):
+        return _not_needed_result(), None
+
+    mobile = identity.normalise_phone(mobile_number)
+    if not mobile:
+        return {
+            "outcome": "invalid_number",
+            "say": "That doesn't look like an Indian mobile number. Could you check it and tell me again?",
+        }, None
+
+    # Same as send_otp: an old website token always counts as signed out.
+    status, browser = browser_sessions.find_by_chat_token(caller.get("user_token"))
+    if status == "retired":
+        return {
+            "outcome": "session_ended",
+            "say": "Your website session has ended. Please refresh the page and ask me again.",
+        }, mobile
+
+    # Store it where verify_otp does, and sign in the website too (shared login).
+    identity.get_session(caller.get("conversation_id"))["verified_mobile"] = mobile
+    if status == "live":
+        browser["mobile"] = mobile
+    return {
+        "outcome": "ok",
+        "say": "Thank you. Let me check that for you now.",
+        "next_step": (
+            "Now call check_dispatch_status (or get_chauffeur_details) again to answer the "
+            "customer's question. Never read the number back to the customer."
+        ),
+    }, mobile
+
+
+# ----------------------------------------------------------------------
+# Tool 6: get_fare (standard fares from the GetRate API)
 # Fares are not personal data: no identity check, works on every channel.
 # ----------------------------------------------------------------------
 
@@ -653,7 +778,7 @@ def call_tool(name, arguments, caller):
     "caller" holds the Perfox headers (phone, channel, conversation_id...).
     The phone number comes ONLY from there, never from "arguments".
     """
-    if name in OTP_TOOLS:
+    if name in OTP_TOOLS + NO_OTP_TOOLS:
         return _call_otp_tool(name, arguments, caller)
     if name in FARE_TOOLS:
         return _call_fare_tool(name, arguments, caller)
@@ -705,12 +830,16 @@ def call_tool(name, arguments, caller):
 
 
 def _call_otp_tool(name, arguments, caller):
-    """Run send_otp or verify_otp, and log it WITHOUT the code."""
+    """Run send_otp, verify_otp or use_mobile_number, and log it WITHOUT the code."""
     started = time.monotonic()
     arguments = arguments or {}
     mobile = None
     try:
-        if name == "send_otp":
+        if name == "use_mobile_number":
+            result, mobile = use_mobile_number(caller, arguments.get("mobile_number"))
+        elif identity.verification_off():
+            result = _not_available_result()  # OTP tools are not listed in "none" mode
+        elif name == "send_otp":
             result, mobile = send_otp(caller, arguments.get("mobile_number"))
         else:
             result, mobile = verify_otp(caller, arguments.get("code"))

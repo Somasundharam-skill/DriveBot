@@ -4,12 +4,17 @@
   GET  /api/session        who is signed in, plus the chat_token for Perfox
   POST /api/login/send-code  text a login code (same OTP rules as the chat)
   POST /api/login/verify     check the code: signed in
+  POST /api/login            UAT DEMOS ONLY (VERIFICATION_MODE=none): signed
+                             in straight away, no code
   POST /api/logout           sign out (the chat needs OTP again)
   GET  /api/my-pickups     today's and upcoming pickups (signed in only)
 
 The browser is recognised by the HttpOnly cookie "dcc_sid" (see
 browser_sessions.py). The full mobile number is never sent to the page,
 only "••••0001". Codes, cookies and tokens are never logged.
+
+VERIFICATION_MODE decides which login works: "otp" has send-code and
+verify, "none" has /api/login. The other endpoints answer 404.
 """
 
 from pathlib import Path
@@ -48,6 +53,18 @@ def check_same_origin(request: Request):
         raise HTTPException(status_code=403, detail="Request refused.")
 
 
+def only_with_otp():
+    """For the code login: 404 when VERIFICATION_MODE=none."""
+    if identity.verification_off():
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
+def only_without_otp():
+    """For the one-step login: 404 unless VERIFICATION_MODE=none."""
+    if not identity.verification_off():
+        raise HTTPException(status_code=404, detail="Not Found")
+
+
 def _load_session(request):
     """Return (sid, session, is_new) for this browser's cookie."""
     return browser_sessions.get_or_create(request.cookies.get(COOKIE_NAME))
@@ -83,6 +100,8 @@ def get_session(request: Request):
         "signed_in": bool(session["mobile"]),
         "masked_mobile": browser_sessions.masked(session["mobile"]),
         "chat_token": session["chat_token"],  # for Perfox 'identify'
+        # Which login the page shows: two steps ("otp") or one ("none").
+        "verification": "none" if identity.verification_off() else "otp",
     }
     return _reply(body, set_sid=sid if is_new else None)
 
@@ -100,7 +119,24 @@ class VerifyBody(BaseModel):
     code: str = ""
 
 
-@router.post("/api/login/send-code", dependencies=[Depends(check_same_origin)])
+def _sign_in(sid, session, mobile):
+    """Sign the browser session in: save the number and give a new cookie.
+
+    The chat_token stays the same, so the chat sees the login at once.
+    """
+    session["mobile"] = mobile
+    new_sid = browser_sessions.change_sid(sid)  # new cookie after logging in
+    return _reply({"outcome": "verified", "signed_in": True,
+                   "masked_mobile": browser_sessions.masked(mobile)}, 200, new_sid)
+
+
+def _invalid_number_reply(set_sid):
+    return _reply({"outcome": "invalid_number",
+                   "message": "Please enter a valid 10-digit Indian mobile number."}, 400, set_sid)
+
+
+# only_with_otp comes first, so in "none" mode these are 404 before anything else.
+@router.post("/api/login/send-code", dependencies=[Depends(only_with_otp), Depends(check_same_origin)])
 def send_code(body: SendCodeBody, request: Request):
     sid, session, is_new = _load_session(request)
     set_sid = sid if is_new else None
@@ -108,8 +144,7 @@ def send_code(body: SendCodeBody, request: Request):
     mobile = identity.normalise_phone(body.mobile)
     if not mobile:
         log.info("web_login", step="send_code", outcome="invalid_number")
-        return _reply({"outcome": "invalid_number",
-                       "message": "Please enter a valid 10-digit Indian mobile number."}, 400, set_sid)
+        return _invalid_number_reply(set_sid)
 
     try:
         outcome = otp.send_code(session, mobile)
@@ -129,7 +164,7 @@ def send_code(body: SendCodeBody, request: Request):
                    "message": "Please wait a moment before asking for another code."}, 429, set_sid)
 
 
-@router.post("/api/login/verify", dependencies=[Depends(check_same_origin)])
+@router.post("/api/login/verify", dependencies=[Depends(only_with_otp), Depends(check_same_origin)])
 def verify_code(body: VerifyBody, request: Request):
     sid, session, is_new = _load_session(request)
     set_sid = sid if is_new else None
@@ -139,10 +174,7 @@ def verify_code(body: VerifyBody, request: Request):
     log.info("web_login", step="verify", mobile=log.mask_mobile(mobile), outcome=outcome)
 
     if outcome == "verified":
-        session["mobile"] = details["mobile"]
-        new_sid = browser_sessions.change_sid(sid)  # new cookie after logging in
-        return _reply({"outcome": "verified", "signed_in": True,
-                       "masked_mobile": browser_sessions.masked(session["mobile"])}, 200, new_sid)
+        return _sign_in(sid, session, details["mobile"])
     if outcome == "wrong_code":
         left = details["attempts_left"]
         return _reply({"outcome": "wrong_code", "attempts_left": left,
@@ -153,6 +185,28 @@ def verify_code(body: VerifyBody, request: Request):
                        "message": f"Too many wrong codes, so you can't log in for now. {_support_text()}"}, 429, set_sid)
     return _reply({"outcome": "expired",
                    "message": "That code has expired. Please ask for a new one."}, 400, set_sid)
+
+
+# ----------------------------------------------------------------------
+# Log in without a code (UAT DEMOS ONLY, VERIFICATION_MODE=none)
+# ----------------------------------------------------------------------
+
+
+class LoginBody(BaseModel):
+    mobile: str = ""
+
+
+@router.post("/api/login", dependencies=[Depends(only_without_otp), Depends(check_same_origin)])
+def login_without_code(body: LoginBody, request: Request):
+    sid, session, is_new = _load_session(request)
+
+    mobile = identity.normalise_phone(body.mobile)
+    if not mobile:
+        log.info("web_login", step="no_code", outcome="invalid_number")
+        return _invalid_number_reply(sid if is_new else None)
+
+    log.info("web_login", step="no_code", mobile=log.mask_mobile(mobile), outcome="verified")
+    return _sign_in(sid, session, mobile)
 
 
 @router.post("/api/logout", dependencies=[Depends(check_same_origin)])

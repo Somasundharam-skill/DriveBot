@@ -9,6 +9,11 @@ SOP 5 rule 1: DriveBot only looks up a TRUSTED number.
 The booking tools NEVER take the phone number from the AI's tool arguments.
 The only place a typed number is accepted is send_otp, which just texts a
 code to it and returns no booking data.
+
+UAT DEMOS ONLY: with VERIFICATION_MODE=none there is no OTP. The
+use_mobile_number tool stores the typed number straight in
+"verified_mobile" (website chat only). Phone, WhatsApp and SMS are
+unchanged: they always use the number from Perfox.
 """
 
 import re
@@ -62,6 +67,12 @@ def get_session(conversation_id):
                 "created_at": time.time(),
             }
         return _sessions[conversation_id]
+
+
+def verification_off():
+    """True when VERIFICATION_MODE=none (UAT demos only): no OTP on website
+    chat or website login. Anything else counts as "otp", the safe choice."""
+    return config.VERIFICATION_MODE == "none"
 
 
 def find_trusted_mobile(caller):

@@ -266,7 +266,8 @@
   </div>
 </footer>
 
-<!-- Added: login. Step 1 asks for the mobile number, step 2 for the 6-digit code. -->
+<!-- Added: login. Step 1 asks for the mobile number, step 2 for the 6-digit code.
+     With VERIFICATION_MODE=none (UAT demos) there is only step 1: see useOneStepLogin(). -->
 <dialog class="login" id="login-dialog" aria-labelledby="login-title">
   <div class="login-top">
     <h2 id="login-title">Log in</h2>
@@ -279,12 +280,12 @@
     <input id="mobile-input" name="mobile" type="tel" inputmode="numeric" autocomplete="tel"
            placeholder="98765 43210" aria-describedby="mobile-help mobile-error" required>
     <p class="error" id="mobile-error" role="alert"></p>
-    <button type="submit" class="btn btn-primary">Send code</button>
+    <button type="submit" class="btn btn-primary" id="mobile-submit">Send code</button>
   </form>
 
   <form id="code-form" novalidate hidden>
     <label for="code-input">6-digit code</label>
-    <p class="help" id="code-help">Enter the code we sent by SMS. In testing it's always <code>123456</code>.</p>
+    <p class="help" id="code-help">Enter the code we sent by SMS.<span id="code-test-hint"> In testing it's always <code>123456</code>.</span></p>
     <input id="code-input" name="code" type="text" inputmode="numeric" autocomplete="one-time-code"
            maxlength="7" placeholder="123456" aria-describedby="code-help code-error" required>
     <p class="error" id="code-error" role="alert"></p>
@@ -449,6 +450,7 @@
       var changed = first || now.signed_in !== current.signed_in || now.masked_mobile !== current.masked_mobile;
       current = now;
       console.debug("[drivebot] session loaded (signed_in: " + now.signed_in + ")");
+      if (now.verification === "none") useOneStepLogin();
 
       if (first) {
         identify(now.chat_token, false);  // before widget.js loads
@@ -563,6 +565,36 @@
     codeInput.focus();
   }
 
+  // UAT demos (VERIFICATION_MODE=none): no code, so the dialog has one step.
+  var oneStep = false;
+  function useOneStepLogin() {
+    if (oneStep) return;
+    oneStep = true;
+    $("mobile-help").textContent = "Enter your mobile number to log in.";
+    $("mobile-submit").textContent = "Log in";
+    var hint = $("code-test-hint");
+    if (hint) hint.remove(); // no "always 123456" text in this mode
+  }
+
+  // One-step login: the server signs us in straight away.
+  function logInWithoutCode() {
+    if (mobileInput.value.replace(/\D/g, "").length < 10) {
+      showError(mobileInput, mobileError, "Please enter a valid 10-digit mobile number.");
+      return;
+    }
+    busy(mobileForm, true);
+    postJSON("/api/login", { mobile: mobileInput.value }).then(function (reply) {
+      if (reply.ok) {
+        dialog.close();
+        // Ask again who is signed in, and tell Perfox again.
+        return refreshSession(true).then(function () { logoutBtn.focus(); });
+      }
+      showError(mobileInput, mobileError, reply.data.message || "Something went wrong. Please try again.");
+    }).catch(function () {
+      showError(mobileInput, mobileError, "We couldn't reach the server. Please try again.");
+    }).then(function () { busy(mobileForm, false); });
+  }
+
   function sendCode() {
     var digits = mobileInput.value.replace(/\D/g, "");
     if (digits.length < 10) {
@@ -598,7 +630,7 @@
 
   mobileForm.addEventListener("submit", function (event) {
     event.preventDefault();
-    sendCode();
+    if (oneStep) logInWithoutCode(); else sendCode();
   });
 
   codeForm.addEventListener("submit", function (event) {

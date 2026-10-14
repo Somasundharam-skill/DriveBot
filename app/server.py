@@ -123,7 +123,7 @@ def tool_list_for_perfox():
     """The tool list. We send the schema as "input_schema" (as Perfox asks)
     and also as "inputSchema" (the name in the MCP standard), to be safe."""
     listed = []
-    for tool in tools.TOOLS:
+    for tool in tools.listed_tools():  # depends on VERIFICATION_MODE
         listed.append({**tool, "inputSchema": tool["input_schema"]})
     return listed
 
@@ -199,7 +199,27 @@ async def mcp(request: Request):
 # ----------------------------------------------------------------------
 
 
+def check_verification_lock():
+    """Safety lock: VERIFICATION_MODE=none only works against UAT.
+
+    With no OTP, anyone can look up any number's bookings, so it must never
+    run on real customer data. If DCC_BOOKING_URL doesn't contain "UAT"
+    (any case), the server refuses to start. There is no override.
+    """
+    if config.VERIFICATION_MODE == "none" and "uat" not in config.DCC_BOOKING_URL.lower():
+        message = ("VERIFICATION_MODE=none is only allowed for UAT demos, but DCC_BOOKING_URL is not "
+                   "a UAT URL. Set VERIFICATION_MODE=otp, or point DCC_BOOKING_URL at UAT.")
+        log.error("verification_lock", note=message)
+        raise SystemExit(f"Refusing to start: {message}")
+
+
 def log_startup_warnings():
+    if config.VERIFICATION_MODE == "none":
+        log.warning("verification_off",
+                    note="Verification is OFF: anyone can check any number's bookings. UAT demo only.")
+    elif config.VERIFICATION_MODE != "otp":
+        log.warning("unknown_verification_mode",
+                    note=f"VERIFICATION_MODE={config.VERIFICATION_MODE!r} is not otp or none; using otp.")
     if not config.MCP_API_KEY:
         log.warning("no_api_key", note="MCP_API_KEY is empty: ALL requests are allowed. Local testing only!")
     if config.TRUST_WEB_PHONE:
@@ -226,6 +246,7 @@ def log_startup_warnings():
         log.warning("mock_otp_on", note=f"OTP_MODE={config.OTP_MODE!r}: no SMS is sent and the code is always the mock code. Never use in production!")
 
 
+check_verification_lock()  # stops here if VERIFICATION_MODE=none outside UAT
 log_startup_warnings()
 
 # Static files from web/ (index.html at "/"). Added LAST, so /mcp, /health,

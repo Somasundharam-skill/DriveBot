@@ -2,7 +2,7 @@
 
 DriveBot is DriveCarClub's AI customer assistant, built on Perfox. Perfox runs the
 conversation. This small server gives DriveBot the business logic and data it needs
-through five tools:
+through these tools:
 
 | Tool | SOP | What it does |
 |---|---|---|
@@ -10,6 +10,7 @@ through five tools:
 | `get_chauffeur_details` | SOP 6 | "Who is my chauffeur, and which car?" |
 | `send_otp` | SOP 5 rule 1 | Website chat: texts a 6-digit code to the customer's number |
 | `verify_otp` | SOP 5 rule 1 | Website chat: checks the code, then the number is trusted |
+| `use_mobile_number` | | **UAT demos only** (`VERIFICATION_MODE=none`): website chat trusts the typed number, no code (section 5b) |
 | `get_fare` | | "How much does a car cost?" Standard rates for a car type, trip type and city (section 6a) |
 
 Nothing else (booking, cancellation, payments) is built yet.
@@ -193,6 +194,48 @@ production.
   `alert_perfox_team`.
 - SMS sending is in [app/sms.py](app/sms.py), so another provider can be added there later.
 
+## 5b. Verification off for UAT demos (`VERIFICATION_MODE=none`)
+
+For demos on UAT test data, OTP can be switched off completely. **Never in production:**
+with it off, anyone can check any number's bookings on website chat.
+
+| `VERIFICATION_MODE` | What happens |
+|---|---|
+| `otp` (default) | Everything as in section 5. Any value other than `none` counts as `otp` (with a startup warning). |
+| `none` | No codes anywhere. Website chat and the test website trust the number the customer types. |
+
+**Safety lock:** with `none`, the server **refuses to start** unless `DCC_BOOKING_URL`
+contains `UAT` (any upper/lower case). There is no override. When it does start, it logs the
+warning `verification_off`: "Verification is OFF: anyone can check any number's bookings.
+UAT demo only."
+
+**Chat, with `none`:**
+
+- `tools/list` hides `send_otp` and `verify_otp` (they answer `not_available` if called anyway)
+  and lists `use_mobile_number` instead.
+- A booking tool answers `verification_needed` with "Please tell me the mobile number you
+  booked with", and tells the AI to call `use_mobile_number`.
+- `use_mobile_number(mobile_number)` normalises the number (`invalid_number` if it isn't an
+  Indian mobile), saves it as the conversation's verified number (the same place `verify_otp`
+  saves it), and signs in the matching website session too (shared login, as with
+  `verify_otp`). It answers `ok`; the AI then calls the booking tool again. It never reads the
+  number back.
+- Phone, WhatsApp and SMS are unchanged: they always use the number from Perfox. On those
+  channels `use_mobile_number` answers `not_needed` and the typed number is never used.
+- With `otp`, `use_mobile_number` is not listed and answers `not_available`.
+
+**Test website, with `none`:**
+
+- `GET /api/session` also returns `"verification": "none"` (or `"otp"`).
+- `POST /api/login` with `{"mobile": "..."}` signs in straight away (same CSRF check, new cookie,
+  and the chat token keeps working, as after `/api/login/verify`). It is `404` with `otp`.
+- `POST /api/login/send-code` and `/api/login/verify` are `404` with `none`.
+- The login dialog has one step (mobile number, then **Log in**). No code step and no
+  "always 123456" hint.
+
+**Switching back:** set `VERIFICATION_MODE=otp` (or remove it) and restart. The OTP code was
+never removed, so everything works as before.
+
 ### Shared login: test website + chat
 
 The test website and the chat share one login, because they run in the same server:
@@ -227,9 +270,10 @@ The website login uses the same code rules and limits as the chat (3 sends, 30 s
 
 | Endpoint | What it does |
 |---|---|
-| `GET /api/session` | Signed in or not, the masked number, and the chat token |
-| `POST /api/login/send-code` | `{"mobile": "..."}`: texts a code |
-| `POST /api/login/verify` | `{"code": "..."}`: checks it and signs in (and changes the cookie) |
+| `GET /api/session` | Signed in or not, the masked number, the chat token, and `verification` (`otp` or `none`) |
+| `POST /api/login/send-code` | `{"mobile": "..."}`: texts a code (`404` with `VERIFICATION_MODE=none`) |
+| `POST /api/login/verify` | `{"code": "..."}`: checks it and signs in (and changes the cookie) (`404` with `none`) |
+| `POST /api/login` | `{"mobile": "..."}`: signs in with no code. **`VERIFICATION_MODE=none` only** (section 5b), otherwise `404` |
 | `POST /api/logout` | Signs out and makes a new chat token |
 | `GET /api/my-pickups` | Today's and upcoming pickups, with safe fields only. `401` when signed out. |
 
@@ -256,7 +300,8 @@ websites can't post with a customer's cookie (CSRF protection).
    - Phone call, WhatsApp, SMS: the `X-Sa-End-User-Phone` header Perfox sends is trusted.
    - Website chat: trusted only after OTP in the chat or a login on the test website
      (section 5). Until then the booking tools return
-     `verification_needed`. `TRUST_WEB_PHONE=true` skips this for development only.
+     `verification_needed`. `TRUST_WEB_PHONE=true` skips this for development only, and
+     `VERIFICATION_MODE=none` for UAT demos only (section 5b; it won't start outside UAT).
    - `send_otp` is the only tool that takes a typed number. It only sends a code to that
      number and returns no booking data.
    - No number, or any other channel: `unavailable`.
