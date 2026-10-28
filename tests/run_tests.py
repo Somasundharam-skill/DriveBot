@@ -33,12 +33,12 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fastapi.testclient import TestClient
 
-from app import browser_sessions, config, fares, identity, otp, sms, tools
+from app import browser_sessions, config, fares, identity, messages, otp, sms, tools
 from app.drivecarclub import DriveCarClubClient
 from app.errors import DCCUnavailable, SMSUnavailable
 from app.mapper import INDIA
@@ -278,7 +278,9 @@ check("no colour field -> car_colour left out, never 'None'",
 check("only the allowlisted chauffeur fields",
       set(details) == {"booking_ref", "pickup_date", "pickup_time", "chauffeur_first_name",
                        "car_model", "registration_number"})
-check("no customer details, address or area", contains_none(text, MOCK_PRIVATE + ["Bengaluru"]), text)
+check("no customer details or address", contains_none(text, MOCK_PRIVATE), text)
+check("area only in the message, not the chauffeur fields",
+      "Bengaluru" not in json.dumps(details) and "Bengaluru" not in result["say"], text)
 
 result, text = call("get_chauffeur_details", {"booking_ref": "DCC100401"}, phone="919000000004")
 check("not allocated -> 'not_allocated'", result["outcome"] == "not_allocated", text)
@@ -1377,6 +1379,115 @@ check("startup logs both modes",
       mode_logs and mode_logs[0]["booking_mode"] == "mock" and mode_logs[0]["rate_mode"] == "mock", mode_logs)
 
 fake_server.shutdown()
+
+# ----------------------------------------------------------------------
+# 11b. Ready-to-send messages ("message" field, messages.py)
+# ----------------------------------------------------------------------
+print("\n--- messages ---")
+
+now = datetime.now(INDIA)
+TODAY_TEXT = now.strftime("%d %b %Y")
+TOMORROW_TEXT = (now + timedelta(days=1)).strftime("%d %b %Y")
+all_messages = []
+
+
+def message_of(result):
+    all_messages.append(result.get("message", ""))
+    return result.get("message")
+
+
+result, _ = call("check_dispatch_status", phone="919000000001")
+check("message: one booking", message_of(result) == (
+    "Good news, your car's on its way 🚗\n"
+    "🚗 Car: Toyota Innova Crysta (KA01AB1234)\n"
+    "📍 Pickup area: Bengaluru\n"
+    f"🕒 Pickup time: {TODAY_TEXT}, 6:30 PM\n"
+    "🔖 Booking: DCC100101\n"
+    "✅ Status: dispatched and on its way\n"
+    "Would you like your chauffeur's details?"), result.get("message"))
+check("message: existing fields kept", result["outcome"] == "one" and result.get("booking") and result.get("say"))
+
+result, _ = call("check_dispatch_status", phone="919000000002")
+check("message: several bookings (time, area, ref only)", message_of(result) == (
+    "I can see 2 upcoming pickups for this number:\n\n"
+    f"1)\n🕒 Pickup time: {TODAY_TEXT}, 3:00 PM\n📍 Pickup area: Hosur\n🔖 Booking: DCC100202\n\n"
+    f"2)\n🕒 Pickup time: {TOMORROW_TEXT}, 8:15 AM\n📍 Pickup area: Whitefield\n🔖 Booking: DCC100203\n\n"
+    "Which pickup do you mean?"), result.get("message"))
+
+result, _ = call("check_dispatch_status", phone="919000000003")
+check("message: no booking", message_of(result) == (
+    "I can't see a car sent for this number yet.\n"
+    "If you need help with a booking, please contact our customer support team."), result.get("message"))
+
+result, _ = call("check_dispatch_status", phone="919000000004")
+message = message_of(result) or ""
+check("message: one booking, no chauffeur yet -> no car line, says not assigned",
+      "Car:" not in message and "on its way" not in message and "🔖 Booking: DCC100401" in message
+      and "A chauffeur hasn't been assigned yet." in message, message)
+
+result, _ = call("get_chauffeur_details", {"booking_ref": "DCC100101"}, phone="919000000001")
+check("message: chauffeur shared", message_of(result) == (
+    "Here are your chauffeur and car details 🧑‍✈️\n"
+    "🧑‍✈️ Chauffeur: Ramesh\n"
+    "🚗 Car: Toyota Innova Crysta (KA01AB1234)\n"
+    f"🕒 Pickup time: {TODAY_TEXT}, 6:30 PM\n"
+    "📍 Pickup area: Bengaluru\n"
+    "Have a comfortable ride."), result.get("message"))
+
+result, _ = call("get_chauffeur_details", {"booking_ref": "DCC100401"}, phone="919000000004")
+check("message: chauffeur not allocated", message_of(result) ==
+      "Your chauffeur hasn't been assigned yet. You'll get the details once they are.", result.get("message"))
+
+fares.clear_cache()
+result, _ = fare()
+check("message: fares", message_of(result) == (
+    "Standard fares for a Midsize car, Local - within city limits, in Gurugram:\n"
+    "8hrs 80kms: Rs 2,400 · extra km Rs 18 · extra hour Rs 150\n"
+    "4hrs 40kms: Rs 1,350 · extra km Rs 18 · extra hour Rs 150\n"
+    f"{config.FARE_NOTE}"), result.get("message"))
+result, _ = fare(service_type="Outstation")
+check("message: outstation fares include allowance and night stay",
+      "250kms per day: Rs 4,500 · extra km Rs 18 · extra hour Rs 0 · outstation allowance Rs 300 · night stay Rs 300"
+      in (message_of(result) or ""), result.get("message"))
+check("message: Indian grouping and paise",
+      [messages.rupees(a) for a in (999, 150000, 12345678, 18.5)]
+      == ["Rs 999", "Rs 1,50,000", "Rs 1,23,45,678", "Rs 18.50"])
+
+result, _ = call("check_dispatch_status", phone="919000000005")
+check("message: unavailable has no message (the AI uses 'say')", "message" not in result, result)
+result, _ = fare(city_name="Atlantis")
+check("message: fare not_found has no message", "message" not in result, result)
+
+# A missing value leaves its line out (and never shows "None").
+bare = {"booking_ref": "DCC9", "pickup_at": None, "pickup_area": "", "status": "",
+        "driver_name": "RAMESH KUMAR", "driver_mobile": "9845012345", "car_model": "",
+        "car_colour": "", "registration_number": "KA01AB1234"}
+message = messages.dispatch_one(bare)
+all_messages.append(message)
+check("message: missing area, time, status and model -> lines left out",
+      "Pickup area" not in message and "Pickup time" not in message and "Status" not in message
+      and "🚗 Car: KA01AB1234" in message and "None" not in message, message)
+message = messages.chauffeur_shared({**bare, "registration_number": "", "car_model": "Honda City"})
+all_messages.append(message)
+check("message: chauffeur card with missing values",
+      "🚗 Car: Honda City" in message and "Pickup" not in message and "None" not in message, message)
+
+# Never: customer name, company, guest number, address, standing instructions,
+# VIP flag, the chauffeur's surname or mobile, or a support phone number.
+FORBIDDEN = MOCK_PRIVATE + ["KUMAR", "Kumar", "Irfan", "Khan", "9845012345", "9845033333", "vip"]
+all_messages = [m for m in all_messages if m]
+check("messages were checked", len(all_messages) == 10, len(all_messages))
+check("no message has a forbidden field", all(contains_none(m, FORBIDDEN) for m in all_messages),
+      [m for m in all_messages if not contains_none(m, FORBIDDEN)])
+check("no message has a phone number or support number",
+      not any(re.search(r"\d{10}", m) or "support team on" in m or tools.SUPPORT_PLACEHOLDER in m
+              for m in all_messages))
+check("messages are plain text: no markdown or JSON",
+      all(not any(mark in m for mark in ("**", "`", "#", "{", "}", "[", "]", "\\n")) for m in all_messages))
+check("cards use real line breaks", sum("\n" in m for m in all_messages) == 9)
+check("booking and fare tool descriptions tell the AI to send 'message' as it is",
+      all("send it to the customer exactly as written" in t["description"]
+          for t in tools.TOOLS if t["name"] in tools.BOOKING_TOOLS + tools.FARE_TOOLS))
 
 # ----------------------------------------------------------------------
 # 12. No support number on the server (it lives in the Perfox knowledge base)

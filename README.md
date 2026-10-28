@@ -347,6 +347,9 @@ the startup warning `whatsapp_number_ask`.
    - Never shared: surname, the customer's name, company and guest number, addresses,
      standing instructions, other drivers' details. The chauffeur's
      mobile stays hidden while `SHARE_CHAUFFEUR_MOBILE = False` in [app/config.py](app/config.py).
+   - The ready-to-send `message` cards (section 6b) follow the same "never shared" list, but
+     the one-booking card also shows the car model and registration (no chauffeur name), and
+     the chauffeur card also shows the pickup area.
 4. **Today and upcoming only** (India time, from `reportingDate`). Completed, closed and
    cancelled bookings are hidden, and the earliest pickup comes first. Only
    `INCLUDE_PAST_BOOKINGS=true` (UAT testing) shows past pickups.
@@ -402,6 +405,39 @@ outcome and the duration. No phone number is involved.
 | `FARE_CAR_CATEGORIES`, `FARE_SERVICE_TYPES`, `FARE_CITIES` | Optional allow-lists, comma-separated (for example `Midsize, Premium`). Empty = no check, because DriveCarClub hasn't given us the lists yet. |
 | `FARE_NOTE` | Added to every fare answer. Default: "Tolls, parking and taxes may be extra. For contract rates or an exact quote, please call our customer support team." |
 
+## 6b. Ready-to-send messages (`message`)
+
+`check_dispatch_status`, `get_chauffeur_details` and `get_fare` also return a `message`: a
+ready-made card, so every customer sees the same layout. It is plain text with real line
+breaks (no markdown, no JSON). The tool descriptions tell the AI to send it exactly as
+written, and to translate it line by line only if the customer writes in another language.
+All the other fields (`outcome`, `say`, `booking`, `chauffeur`, `packages`...) are unchanged.
+The cards are built in [app/messages.py](app/messages.py).
+
+| Tool / outcome | `message` |
+|---|---|
+| `check_dispatch_status` `one`, chauffeur allocated | "Good news, your car's on its way 🚗", then 🚗 Car (model and registration), 📍 Pickup area, 🕒 Pickup time, 🔖 Booking, ✅ Status, then "Would you like your chauffeur's details?" |
+| `check_dispatch_status` `one`, no chauffeur yet | "I can see your booking 🚗", area, time, booking, status (no car line), then "A chauffeur hasn't been assigned yet. You'll get the details once they are." |
+| `check_dispatch_status` `several` | A short intro, one numbered block per booking (pickup time, area and booking reference only), then "Which pickup do you mean?" |
+| `check_dispatch_status` `none` | "I can't see a car sent for this number yet." and a line asking them to contact our customer support team |
+| `get_chauffeur_details` `shared` | "Here are your chauffeur and car details 🧑‍✈️", then 🧑‍✈️ Chauffeur (first name), 🚗 Car, 🕒 Pickup time, 📍 Pickup area, then "Have a comfortable ride." |
+| `get_chauffeur_details` `not_allocated` | "Your chauffeur hasn't been assigned yet. You'll get the details once they are." |
+| `get_fare` `found` | A heading (car type, trip type, city), one line per package such as "8hrs 80kms: Rs 2,400 · extra km Rs 18 · extra hour Rs 150" (plus the outstation allowance and night stay when above 0), then `FARE_NOTE` |
+
+Other outcomes (`verification_needed`, `unavailable`, `not_found`, `invalid_input`...) have no
+`message`; the AI uses `say`.
+
+- Pickup times look like `05 Aug 2026, 6:30 PM` (India time). "Despatched" is shown as
+  "dispatched and on its way"; other statuses as DriveCarClub sends them.
+- Amounts use Indian grouping: `Rs 1,50,000`, and paise only when there are any (`Rs 18.50`).
+- **A line whose value is missing is left out**, never shown as empty or "None".
+- **Never in a message:** the customer's name, company or guest number, the address, the
+  VIP flag, standing instructions, the chauffeur's surname or mobile, or a support phone
+  number (the cards say "contact our customer support team", with no number).
+- Note: the one-booking card shows the car model and registration, and the chauffeur card
+  shows the pickup area. These are in `message` only. The `booking` and `chauffeur` fields
+  keep their old allowlists (section 6, rule 3).
+
 ## 7. Project layout
 
 | File | What it does |
@@ -411,6 +447,7 @@ outcome and the duration. No phone number is involved.
 | `app/browser_sessions.py` | Website sessions (cookie, chat token, 8-hour expiry) |
 | `web/index.html` | The test page: log in, your pickups, the Perfox chat |
 | `app/tools.py` | The four tools, their descriptions, and the SOP wording |
+| `app/messages.py` | The ready-to-send `message` cards for the booking and fare tools |
 | `app/otp.py` | OTP rules: making, hashing and checking codes, and the limits |
 | `app/sms.py` | Sending the SMS (mock or Plivo) |
 | `app/identity.py` | Trusted-number rules, phone formatting, per-conversation sessions |

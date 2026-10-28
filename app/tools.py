@@ -14,6 +14,8 @@ With WHATSAPP_NUMBER_MODE=ask, those tools work on WhatsApp too.
 Every tool returns a dict with:
   "outcome"  a fixed code the AI can rely on
   "say"      what the AI should tell the customer (SOP wording)
+  "message"  (booking and fare answers only) a ready-to-send card, see
+             messages.py; the AI sends it as it is
 plus only the allowlisted booking fields from mapper.py (or the fare
 fields from fares.py).
 
@@ -25,7 +27,7 @@ fares are not personal data, and it never guesses a fare.
 
 import time
 
-from app import browser_sessions, config, fares, identity, log, mapper, otp
+from app import browser_sessions, config, fares, identity, log, mapper, messages, otp
 from app.errors import DCCUnavailable, SMSUnavailable
 
 # ----------------------------------------------------------------------
@@ -39,6 +41,12 @@ SUPPORT_PLACEHOLDER = "[share the customer support number from the knowledge bas
 SUPPORT_HINT = (
     f" Where 'say' contains {SUPPORT_PLACEHOLDER}, replace it with the customer "
     "support number from your knowledge base; never make a number up."
+)
+# For the tools whose results have a ready-made "message" (messages.py).
+MESSAGE_HINT = (
+    " When the result has a 'message', send it to the customer exactly as written, "
+    "keeping its line breaks and emojis, instead of writing your own sentence. Only if "
+    "the customer is writing in another language, translate it line by line."
 )
 
 # ----------------------------------------------------------------------
@@ -63,6 +71,7 @@ TOOLS = [
             "time and area, then use that booking's booking_ref. If the outcome is "
             "'verification_needed' (website chat), ask for their mobile number and call "
             "send_otp with it."
+            + MESSAGE_HINT
             + SUPPORT_HINT
         ),
         "input_schema": {
@@ -86,6 +95,7 @@ TOOLS = [
             "'shared', share exactly these details and nothing more. Never share details "
             "of any other driver or booking. If the outcome is 'verification_needed' "
             "(website chat), ask for their mobile number and call send_otp with it."
+            + MESSAGE_HINT
             + SUPPORT_HINT
         ),
         "input_schema": {
@@ -197,6 +207,7 @@ TOOLS = [
             "says, in their language. Quote the amounts exactly as given; never round, add "
             "up, estimate or invent a fare. If the outcome is 'invalid_input', ask the "
             "customer for the details 'say' mentions and call get_fare again."
+            + MESSAGE_HINT
             + SUPPORT_HINT
         ),
         "input_schema": {
@@ -380,6 +391,7 @@ def check_dispatch_status(mobile):
                 "I can't see a car sent for this number yet. "
                 f"If you need help with a booking, {_support_line()}."
             ),
+            "message": messages.dispatch_none(),
         }
 
     if len(bookings) == 1:
@@ -398,7 +410,7 @@ def check_dispatch_status(mobile):
                 "been assigned yet. You'll get the details once they are. "
                 f"For anything urgent, {_support_line()}."
             )
-        return {"outcome": "one", "booking": summary, "say": say}
+        return {"outcome": "one", "booking": summary, "say": say, "message": messages.dispatch_one(booking)}
 
     # Several bookings: read out only date, time and area of each (SOP 5 rule 6).
     choices = []
@@ -413,6 +425,7 @@ def check_dispatch_status(mobile):
             + "; ".join(choices)
             + ". Which pickup do you mean?"
         ),
+        "message": messages.dispatch_several(bookings),
         "next_step": (
             "When the customer chooses, confirm that pickup: if chauffeur_allocated is true "
             "say the car has been sent and offer chauffeur details (get_chauffeur_details "
@@ -453,6 +466,7 @@ def get_chauffeur_details(mobile, booking_ref):
                 "Your chauffeur hasn't been assigned yet. You'll get the details once they are. "
                 f"For anything urgent, {_support_line()}."
             ),
+            "message": messages.chauffeur_not_allocated(),
         }
 
     details = mapper.chauffeur_details(booking)
@@ -465,7 +479,7 @@ def get_chauffeur_details(mobile, booking_ref):
     )
     if details.get("chauffeur_mobile"):
         say += f" You can reach them on {details['chauffeur_mobile']}."
-    return {"outcome": "shared", "chauffeur": details, "say": say}
+    return {"outcome": "shared", "chauffeur": details, "say": say, "message": messages.chauffeur_shared(booking)}
 
 
 # ----------------------------------------------------------------------
@@ -747,6 +761,13 @@ def get_fare(arguments, log_details):
     return {
         "outcome": "found",
         "packages": packages,
+        "message": messages.fare_found(
+            first["car_category"] or inputs["car_category"],
+            first["service_type"] or inputs["service_type"],
+            first["city"] or inputs["city_name"],
+            packages,
+            config.FARE_NOTE,
+        ),
         "say": (
             f"Our standard rates for a {first['car_category'] or inputs['car_category']} car, "
             f"{first['service_type'] or inputs['service_type']}, in "
