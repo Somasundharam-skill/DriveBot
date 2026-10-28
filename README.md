@@ -427,6 +427,8 @@ The cards are built in [app/messages.py](app/messages.py).
 Other outcomes (`verification_needed`, `unavailable`, `not_found`, `invalid_input`...) have no
 `message`; the AI uses `say`.
 
+- Layout: the heading, a blank line, the detail lines together (no blank lines between them),
+  a blank line, then the closing line. Several bookings have a blank line between blocks.
 - Pickup times look like `05 Aug 2026, 6:30 PM` (India time). "Despatched" is shown as
   "dispatched and on its way"; other statuses as DriveCarClub sends them.
 - Amounts use Indian grouping: `Rs 1,50,000`, and paise only when there are any (`Rs 18.50`).

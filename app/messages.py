@@ -1,7 +1,9 @@
 """Ready-to-send messages ("message" field) for the booking and fare tools.
 
 DriveBot relays these as they are, so every customer sees the same card.
-Plain text with real line breaks: no markdown, no JSON.
+Plain text with real line breaks: no markdown, no JSON. Each card is a
+heading, a blank line, the detail lines together, a blank line, and a
+closing line (see _card). Several bookings: a blank line between blocks.
 
 Safety rules (the same as mapper.py, enforced here too):
   - Only these booking fields are ever read: booking_ref, pickup_at,
@@ -26,6 +28,12 @@ FRIENDLY_STATUS = {
 def _lines(*lines):
     """Join the lines, leaving out the empty ones (missing values)."""
     return "\n".join(line for line in lines if line)
+
+
+def _card(heading, details, closing):
+    """Heading, blank line, the detail lines together, blank line, closing.
+    Empty details are left out, and so is the detail block if none are left."""
+    return "\n\n".join(part for part in (heading, _lines(*details), closing) if part)
 
 
 def _line(label, value):
@@ -60,22 +68,26 @@ def friendly_status(status):
 
 def dispatch_one(booking):
     if mapper.is_chauffeur_allocated(booking):
-        return _lines(
+        return _card(
             "Good news, your car's on its way 🚗",
-            _line("🚗 Car", car(booking)),
+            [
+                _line("🚗 Car", car(booking)),
+                _line("📍 Pickup area", booking["pickup_area"]),
+                _line("🕒 Pickup time", pickup_time(booking)),
+                _line("🔖 Booking", booking["booking_ref"]),
+                _line("✅ Status", friendly_status(booking["status"])),
+            ],
+            "Would you like your chauffeur's details?",
+        )
+    # No chauffeur yet, so no car has been sent: no car line.
+    return _card(
+        "I can see your booking 🚗",
+        [
             _line("📍 Pickup area", booking["pickup_area"]),
             _line("🕒 Pickup time", pickup_time(booking)),
             _line("🔖 Booking", booking["booking_ref"]),
             _line("✅ Status", friendly_status(booking["status"])),
-            "Would you like your chauffeur's details?",
-        )
-    # No chauffeur yet, so no car has been sent: no car line.
-    return _lines(
-        "I can see your booking 🚗",
-        _line("📍 Pickup area", booking["pickup_area"]),
-        _line("🕒 Pickup time", pickup_time(booking)),
-        _line("🔖 Booking", booking["booking_ref"]),
-        _line("✅ Status", friendly_status(booking["status"])),
+        ],
         "A chauffeur hasn't been assigned yet. You'll get the details once they are.",
     )
 
@@ -95,7 +107,7 @@ def dispatch_several(bookings):
 
 
 def dispatch_none():
-    return _lines("I can't see a car sent for this number yet.", SUPPORT_LINE)
+    return _card("I can't see a car sent for this number yet.", [], SUPPORT_LINE)
 
 
 # ----------------------------------------------------------------------
@@ -104,12 +116,14 @@ def dispatch_none():
 
 
 def chauffeur_shared(booking):
-    return _lines(
+    return _card(
         "Here are your chauffeur and car details 🧑‍✈️",
-        _line("🧑‍✈️ Chauffeur", mapper.first_name(booking["driver_name"])),
-        _line("🚗 Car", car(booking)),
-        _line("🕒 Pickup time", pickup_time(booking)),
-        _line("📍 Pickup area", booking["pickup_area"]),
+        [
+            _line("🧑‍✈️ Chauffeur", mapper.first_name(booking["driver_name"])),
+            _line("🚗 Car", car(booking)),
+            _line("🕒 Pickup time", pickup_time(booking)),
+            _line("📍 Pickup area", booking["pickup_area"]),
+        ],
         "Have a comfortable ride.",
     )
 
@@ -152,4 +166,4 @@ def fare_package(package):
 
 def fare_found(car_category, service_type, city, packages, note):
     heading = f"Standard fares for a {car_category} car, {service_type}, in {city}:"
-    return _lines(heading, *(fare_package(p) for p in packages), note)
+    return _card(heading, [fare_package(p) for p in packages], note)

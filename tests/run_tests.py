@@ -1398,12 +1398,12 @@ def message_of(result):
 
 result, _ = call("check_dispatch_status", phone="919000000001")
 check("message: one booking", message_of(result) == (
-    "Good news, your car's on its way 🚗\n"
+    "Good news, your car's on its way 🚗\n\n"
     "🚗 Car: Toyota Innova Crysta (KA01AB1234)\n"
     "📍 Pickup area: Bengaluru\n"
     f"🕒 Pickup time: {TODAY_TEXT}, 6:30 PM\n"
     "🔖 Booking: DCC100101\n"
-    "✅ Status: dispatched and on its way\n"
+    "✅ Status: dispatched and on its way\n\n"
     "Would you like your chauffeur's details?"), result.get("message"))
 check("message: existing fields kept", result["outcome"] == "one" and result.get("booking") and result.get("say"))
 
@@ -1416,22 +1416,24 @@ check("message: several bookings (time, area, ref only)", message_of(result) == 
 
 result, _ = call("check_dispatch_status", phone="919000000003")
 check("message: no booking", message_of(result) == (
-    "I can't see a car sent for this number yet.\n"
+    "I can't see a car sent for this number yet.\n\n"
     "If you need help with a booking, please contact our customer support team."), result.get("message"))
 
 result, _ = call("check_dispatch_status", phone="919000000004")
 message = message_of(result) or ""
 check("message: one booking, no chauffeur yet -> no car line, says not assigned",
       "Car:" not in message and "on its way" not in message and "🔖 Booking: DCC100401" in message
-      and "A chauffeur hasn't been assigned yet." in message, message)
+      and message.startswith("I can see your booking 🚗\n\n📍 Pickup area: Jayanagar\n")
+      and message.endswith("✅ Status: Confirmed\n\nA chauffeur hasn't been assigned yet. "
+                            "You'll get the details once they are."), message)
 
 result, _ = call("get_chauffeur_details", {"booking_ref": "DCC100101"}, phone="919000000001")
 check("message: chauffeur shared", message_of(result) == (
-    "Here are your chauffeur and car details 🧑‍✈️\n"
+    "Here are your chauffeur and car details 🧑‍✈️\n\n"
     "🧑‍✈️ Chauffeur: Ramesh\n"
     "🚗 Car: Toyota Innova Crysta (KA01AB1234)\n"
     f"🕒 Pickup time: {TODAY_TEXT}, 6:30 PM\n"
-    "📍 Pickup area: Bengaluru\n"
+    "📍 Pickup area: Bengaluru\n\n"
     "Have a comfortable ride."), result.get("message"))
 
 result, _ = call("get_chauffeur_details", {"booking_ref": "DCC100401"}, phone="919000000004")
@@ -1441,9 +1443,9 @@ check("message: chauffeur not allocated", message_of(result) ==
 fares.clear_cache()
 result, _ = fare()
 check("message: fares", message_of(result) == (
-    "Standard fares for a Midsize car, Local - within city limits, in Gurugram:\n"
+    "Standard fares for a Midsize car, Local - within city limits, in Gurugram:\n\n"
     "8hrs 80kms: Rs 2,400 · extra km Rs 18 · extra hour Rs 150\n"
-    "4hrs 40kms: Rs 1,350 · extra km Rs 18 · extra hour Rs 150\n"
+    "4hrs 40kms: Rs 1,350 · extra km Rs 18 · extra hour Rs 150\n\n"
     f"{config.FARE_NOTE}"), result.get("message"))
 result, _ = fare(service_type="Outstation")
 check("message: outstation fares include allowance and night stay",
@@ -1471,12 +1473,19 @@ message = messages.chauffeur_shared({**bare, "registration_number": "", "car_mod
 all_messages.append(message)
 check("message: chauffeur card with missing values",
       "🚗 Car: Honda City" in message and "Pickup" not in message and "None" not in message, message)
+message = messages.dispatch_one({**bare, "booking_ref": "", "registration_number": "", "driver_name": ""})
+all_messages.append(message)
+check("message: no detail lines at all -> heading and closing with one blank line",
+      message == "I can see your booking 🚗\n\n"
+                 "A chauffeur hasn't been assigned yet. You'll get the details once they are.", message)
 
 # Never: customer name, company, guest number, address, standing instructions,
 # VIP flag, the chauffeur's surname or mobile, or a support phone number.
 FORBIDDEN = MOCK_PRIVATE + ["KUMAR", "Kumar", "Irfan", "Khan", "9845012345", "9845033333", "vip"]
 all_messages = [m for m in all_messages if m]
-check("messages were checked", len(all_messages) == 10, len(all_messages))
+check("messages were checked", len(all_messages) == 11, len(all_messages))
+check("no message has two blank lines in a row, or starts or ends with one",
+      all("\n\n\n" not in m and m == m.strip("\n") for m in all_messages))
 check("no message has a forbidden field", all(contains_none(m, FORBIDDEN) for m in all_messages),
       [m for m in all_messages if not contains_none(m, FORBIDDEN)])
 check("no message has a phone number or support number",
@@ -1484,7 +1493,7 @@ check("no message has a phone number or support number",
               for m in all_messages))
 check("messages are plain text: no markdown or JSON",
       all(not any(mark in m for mark in ("**", "`", "#", "{", "}", "[", "]", "\\n")) for m in all_messages))
-check("cards use real line breaks", sum("\n" in m for m in all_messages) == 9)
+check("cards use real line breaks", sum("\n" in m for m in all_messages) == 10)
 check("booking and fare tool descriptions tell the AI to send 'message' as it is",
       all("send it to the customer exactly as written" in t["description"]
           for t in tools.TOOLS if t["name"] in tools.BOOKING_TOOLS + tools.FARE_TOOLS))
