@@ -213,6 +213,22 @@ def check_verification_lock():
         raise SystemExit(f"Refusing to start: {message}")
 
 
+def check_whatsapp_number_lock():
+    """Safety lock: WHATSAPP_NUMBER_MODE=ask with VERIFICATION_MODE=none only
+    works against UAT.
+
+    Then anyone on WhatsApp can type any number and see its bookings, so it
+    must never run on real customer data. Same rule as above: no override.
+    """
+    if (config.WHATSAPP_NUMBER_MODE == "ask" and config.VERIFICATION_MODE == "none"
+            and "uat" not in config.DCC_BOOKING_URL.lower()):
+        message = ("WHATSAPP_NUMBER_MODE=ask with VERIFICATION_MODE=none is only allowed for UAT demos, "
+                   "but DCC_BOOKING_URL is not a UAT URL. Set VERIFICATION_MODE=otp or "
+                   "WHATSAPP_NUMBER_MODE=auto, or point DCC_BOOKING_URL at UAT.")
+        log.error("whatsapp_number_lock", note=message)
+        raise SystemExit(f"Refusing to start: {message}")
+
+
 def log_startup_warnings():
     if config.VERIFICATION_MODE == "none":
         log.warning("verification_off",
@@ -220,6 +236,14 @@ def log_startup_warnings():
     elif config.VERIFICATION_MODE != "otp":
         log.warning("unknown_verification_mode",
                     note=f"VERIFICATION_MODE={config.VERIFICATION_MODE!r} is not otp or none; using otp.")
+    if config.WHATSAPP_NUMBER_MODE == "ask":
+        log.warning("whatsapp_number_ask",
+                    note="WHATSAPP_NUMBER_MODE=ask: the WhatsApp sender's number is ignored; customers "
+                         "type their registered number (" + ("no code check. UAT demo only!"
+                         if config.VERIFICATION_MODE == "none" else "checked with an OTP") + ").")
+    elif config.WHATSAPP_NUMBER_MODE != "auto":
+        log.warning("unknown_whatsapp_number_mode",
+                    note=f"WHATSAPP_NUMBER_MODE={config.WHATSAPP_NUMBER_MODE!r} is not ask or auto; using auto.")
     if not config.MCP_API_KEY:
         log.warning("no_api_key", note="MCP_API_KEY is empty: ALL requests are allowed. Local testing only!")
     if config.TRUST_WEB_PHONE:
@@ -247,6 +271,7 @@ def log_startup_warnings():
 
 
 check_verification_lock()  # stops here if VERIFICATION_MODE=none outside UAT
+check_whatsapp_number_lock()  # (in practice already caught by the lock above)
 log_startup_warnings()
 
 # Static files from web/ (index.html at "/"). Added LAST, so /mcp, /health,

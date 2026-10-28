@@ -125,6 +125,17 @@ PLIVO_SENDER_ID = _text("PLIVO_SENDER_ID")
 #          in place, so switching back is just VERIFICATION_MODE=otp.
 VERIFICATION_MODE = _text("VERIFICATION_MODE", "otp").lower()
 
+# --- Mobile number on WhatsApp -----------------------------------------
+# "auto" = the WhatsApp sender's number (X-Sa-End-User-Phone) is trusted
+#          and used for lookups (default).
+# "ask"  = the sender's number is ignored: the customer types their
+#          registered number, checked the same way as on website chat
+#          (OTP, or use_mobile_number with VERIFICATION_MODE=none). With
+#          VERIFICATION_MODE=none the server refuses to start unless
+#          DCC_BOOKING_URL is a UAT URL (see server.py).
+# Anything else counts as "auto" (with a startup warning).
+WHATSAPP_NUMBER_MODE = _text("WHATSAPP_NUMBER_MODE", "auto").lower()
+
 # Development only: trust the phone number on website chat without OTP.
 TRUST_WEB_PHONE = _yes_no("TRUST_WEB_PHONE")
 

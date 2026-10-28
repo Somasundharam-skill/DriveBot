@@ -14,6 +14,11 @@ UAT DEMOS ONLY: with VERIFICATION_MODE=none there is no OTP. The
 use_mobile_number tool stores the typed number straight in
 "verified_mobile" (website chat only). Phone, WhatsApp and SMS are
 unchanged: they always use the number from Perfox.
+
+WHATSAPP_NUMBER_MODE=ask: WhatsApp is treated like website chat (without
+the website login). The sender's number is ignored, and only a number
+the customer typed and proved (OTP, or use_mobile_number in
+VERIFICATION_MODE=none) is used. Phone and SMS are unchanged.
 """
 
 import re
@@ -75,6 +80,22 @@ def verification_off():
     return config.VERIFICATION_MODE == "none"
 
 
+def whatsapp_asks_number():
+    """True when WHATSAPP_NUMBER_MODE=ask. Anything else counts as "auto"."""
+    return config.WHATSAPP_NUMBER_MODE == "ask"
+
+
+def channel_of(caller):
+    return (caller.get("channel") or "").strip().lower()
+
+
+def asks_for_number(caller):
+    """True on channels where the customer types their number and we check
+    it: website chat always, WhatsApp only with WHATSAPP_NUMBER_MODE=ask."""
+    channel = channel_of(caller)
+    return channel == "web" or (channel == "whatsapp" and whatsapp_asks_number())
+
+
 def find_trusted_mobile(caller):
     """Decide which mobile number (if any) we may look up.
 
@@ -84,8 +105,16 @@ def find_trusted_mobile(caller):
       (None, "verification_needed")  -> website chat, needs OTP first
       (None, "no_trusted_number")    -> nothing we can trust
     """
-    channel = (caller.get("channel") or "").strip().lower()
+    channel = channel_of(caller)
     mobile = normalise_phone(caller.get("phone"))
+
+    if channel == "whatsapp" and whatsapp_asks_number():
+        # The sender's number is ignored: only a number typed in this
+        # conversation and proved (OTP or use_mobile_number) counts.
+        session = get_session(caller.get("conversation_id"))
+        if session.get("verified_mobile"):
+            return session["verified_mobile"], None
+        return None, "verification_needed"
 
     if channel in TRUSTED_CHANNELS:
         if mobile:

@@ -9,6 +9,7 @@
 
 Which tools are listed depends on VERIFICATION_MODE (see listed_tools):
 "otp" lists send_otp and verify_otp, "none" lists use_mobile_number.
+With WHATSAPP_NUMBER_MODE=ask, those tools work on WhatsApp too.
 
 Every tool returns a dict with:
   "outcome"  a fixed code the AI can rely on
@@ -232,20 +233,21 @@ def listed_tools():
     "otp":  everything except use_mobile_number (as before).
     "none": no send_otp or verify_otp; use_mobile_number instead, and the
             booking tools point to it instead of send_otp.
+    WHATSAPP_NUMBER_MODE=ask: the descriptions say WhatsApp too.
     """
-    if not identity.verification_off():
-        return [tool for tool in TOOLS if tool["name"] not in NO_OTP_TOOLS]
-
+    hidden = OTP_TOOLS if identity.verification_off() else NO_OTP_TOOLS
     listed = []
     for tool in TOOLS:
-        if tool["name"] in OTP_TOOLS:
+        if tool["name"] in hidden:
             continue
-        if tool["name"] in BOOKING_TOOLS:
-            description = tool["description"].replace(
-                "call send_otp with it", "call use_mobile_number with it"
-            )
-            tool = {**tool, "description": description}
-        listed.append(tool)
+        description = tool["description"]
+        if identity.verification_off() and tool["name"] in BOOKING_TOOLS:
+            description = description.replace("call send_otp with it", "call use_mobile_number with it")
+        if identity.whatsapp_asks_number():
+            description = description.replace(
+                "Website chat only.", "Website chat and WhatsApp only."
+            ).replace("(website chat)", "(website chat or WhatsApp)")
+        listed.append({**tool, "description": description})
     return listed
 
 
@@ -258,25 +260,39 @@ def _support_line():
     return f"please call our customer support team on {SUPPORT_PLACEHOLDER}"
 
 
-def _verification_needed_result():
+def _verification_needed_result(caller):
+    # On WhatsApp (WHATSAPP_NUMBER_MODE=ask) the customer is already on a
+    # phone, so be clear we need the number they BOOKED with.
+    on_whatsapp = identity.channel_of(caller) == "whatsapp"
     if identity.verification_off():
         # UAT demos: no code, just ask for the number.
-        return {
-            "outcome": "verification_needed",
-            "say": (
+        if on_whatsapp:
+            say = (
+                "To look up your booking, please tell me the registered mobile number "
+                "you booked with (10 digits, no country code needed)."
+            )
+        else:
+            say = (
                 "To look up your booking, I need your mobile number. "
                 "Please tell me the mobile number you booked with."
-            ),
+            )
+        return {
+            "outcome": "verification_needed",
+            "say": say,
             "next_step": (
                 "When the customer gives their own mobile number, call use_mobile_number "
                 "with it. Never read the number back to them."
             ),
         }
+    if on_whatsapp:
+        number = "the registered mobile number you booked with (10 digits, no country code needed)"
+    else:
+        number = "your mobile number"
     return {
         "outcome": "verification_needed",
         "say": (
             "For your security, I need to verify your mobile number before I can share "
-            "booking details. Please tell me your mobile number and I'll send you a "
+            f"booking details. Please tell me {number} and I'll send you a "
             "one-time code by SMS."
         ),
         "next_step": (
@@ -458,8 +474,12 @@ def get_chauffeur_details(mobile, booking_ref):
 # ----------------------------------------------------------------------
 
 
-def _is_web(caller):
-    return (caller.get("channel") or "").strip().lower() == "web"
+def _browser_session(caller):
+    """The website login linked to this chat (see browser_sessions.py).
+    Website chat only: on WhatsApp there is no website login to share."""
+    if identity.channel_of(caller) != "web":
+        return "unknown", None
+    return browser_sessions.find_by_chat_token(caller.get("user_token"))
 
 
 def _not_needed_result():
@@ -485,7 +505,7 @@ def send_otp(caller, mobile_number):
 
     Returns (result, mobile) so call_tool can log the masked number.
     """
-    if not _is_web(caller):
+    if not identity.asks_for_number(caller):
         return _not_needed_result(), None
 
     mobile = identity.normalise_phone(mobile_number)
@@ -497,7 +517,7 @@ def send_otp(caller, mobile_number):
 
     # An old website token (the customer logged out in another tab): a chat
     # OTP would not count, so ask them to refresh the page instead.
-    status, _ = browser_sessions.find_by_chat_token(caller.get("user_token"))
+    status, _ = _browser_session(caller)
     if status == "retired":
         return {
             "outcome": "session_ended",
@@ -532,7 +552,7 @@ def verify_otp(caller, code):
 
     Returns (result, mobile) so call_tool can log the masked number.
     """
-    if not _is_web(caller):
+    if not identity.asks_for_number(caller):
         return _not_needed_result(), None
 
     session = identity.get_session(caller.get("conversation_id"))
@@ -543,7 +563,7 @@ def verify_otp(caller, code):
         session["verified_mobile"] = details["mobile"]
         # Shared login: if the customer is on our website, sign the browser
         # in too, so the website shows them as signed in.
-        status, browser = browser_sessions.find_by_chat_token(caller.get("user_token"))
+        status, browser = _browser_session(caller)
         if status == "live":
             browser["mobile"] = details["mobile"]
         return {
@@ -594,9 +614,9 @@ def use_mobile_number(caller, mobile_number):
     """
     if not identity.verification_off():
         return _not_available_result(), None
-    # Phone, WhatsApp and SMS always use the number from Perfox: a typed
-    # number is never used there.
-    if not _is_web(caller):
+    # Phone and SMS (and WhatsApp unless WHATSAPP_NUMBER_MODE=ask) always use
+    # the number from Perfox: a typed number is never used there.
+    if not identity.asks_for_number(caller):
         return _not_needed_result(), None
 
     mobile = identity.normalise_phone(mobile_number)
@@ -607,7 +627,7 @@ def use_mobile_number(caller, mobile_number):
         }, None
 
     # Same as send_otp: an old website token always counts as signed out.
-    status, browser = browser_sessions.find_by_chat_token(caller.get("user_token"))
+    status, browser = _browser_session(caller)
     if status == "retired":
         return {
             "outcome": "session_ended",
@@ -810,7 +830,7 @@ def call_tool(name, arguments, caller):
     mobile, problem = identity.find_trusted_mobile(caller)
     try:
         if problem == "verification_needed":
-            result = _verification_needed_result()
+            result = _verification_needed_result(caller)
         elif problem:
             result = _unavailable_result(problem)
         elif name == "check_dispatch_status":

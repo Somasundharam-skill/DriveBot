@@ -8,9 +8,9 @@ through these tools:
 |---|---|---|
 | `check_dispatch_status` | SOP 5 | "Has my car been sent?" |
 | `get_chauffeur_details` | SOP 6 | "Who is my chauffeur, and which car?" |
-| `send_otp` | SOP 5 rule 1 | Website chat: texts a 6-digit code to the customer's number |
-| `verify_otp` | SOP 5 rule 1 | Website chat: checks the code, then the number is trusted |
-| `use_mobile_number` | | **UAT demos only** (`VERIFICATION_MODE=none`): website chat trusts the typed number, no code (section 5b) |
+| `send_otp` | SOP 5 rule 1 | Website chat (and WhatsApp with `WHATSAPP_NUMBER_MODE=ask`): texts a 6-digit code to the customer's number |
+| `verify_otp` | SOP 5 rule 1 | Website chat (and WhatsApp with `WHATSAPP_NUMBER_MODE=ask`): checks the code, then the number is trusted |
+| `use_mobile_number` | | **UAT demos only** (`VERIFICATION_MODE=none`): website chat (and WhatsApp with `ask`) trusts the typed number, no code (sections 5b, 5c) |
 | `get_fare` | | "How much does a car cost?" Standard rates for a car type, trip type and city (section 6a) |
 
 Nothing else (booking, cancellation, payments) is built yet.
@@ -149,7 +149,8 @@ else gives `not_found`.
 
 On website chat anyone can type any number, so DriveBot checks that the number belongs
 to the customer before sharing booking details. Phone calls, WhatsApp and SMS don't need
-this, because there the number comes from the phone network.
+this, because there the number comes from the phone network (unless
+`WHATSAPP_NUMBER_MODE=ask`, section 5c, which makes WhatsApp work like website chat).
 
 **How it works**
 
@@ -222,6 +223,7 @@ UAT demo only."
   number back.
 - Phone, WhatsApp and SMS are unchanged: they always use the number from Perfox. On those
   channels `use_mobile_number` answers `not_needed` and the typed number is never used.
+  (Exception: WhatsApp with `WHATSAPP_NUMBER_MODE=ask`, section 5c.)
 - With `otp`, `use_mobile_number` is not listed and answers `not_available`.
 
 **Test website, with `none`:**
@@ -294,10 +296,40 @@ websites can't post with a customer's cookie (CSRF protection).
 - Open the browser console with "Verbose" logs on to see `[drivebot]` lines: session loaded,
   identify called, widget script loading, bubble shown, widget ready.
 
+## 5c. Ask for the number on WhatsApp (`WHATSAPP_NUMBER_MODE`)
+
+By default the WhatsApp sender's number is used for lookups. Some customers chat from a
+different number than the one they booked with, so WhatsApp can ask for it instead.
+
+| `WHATSAPP_NUMBER_MODE` | What happens on WhatsApp |
+|---|---|
+| `auto` (default) | As before: the sender's number (`X-Sa-End-User-Phone`) is trusted and used. Any value other than `ask` counts as `auto` (with a startup warning). |
+| `ask` | The sender's number is **ignored** for lookups. The booking tools answer `verification_needed` until the customer gives a number, which is then checked as on website chat. |
+
+With `ask`, how the typed number is checked follows `VERIFICATION_MODE`:
+
+- `otp`: `send_otp` and `verify_otp` work on WhatsApp, exactly as on website chat (section 5).
+  The code goes by SMS to the **typed** number.
+- `none` (UAT demos only): `use_mobile_number` works on WhatsApp and saves the typed number as
+  the conversation's trusted number, as on website chat (section 5b).
+
+The `verification_needed` answer on WhatsApp asks for "the registered mobile number you
+booked with (10 digits, no country code needed)". The tool descriptions say "Website chat and
+WhatsApp only" instead of "Website chat only". The website login (shared login) is never used
+on WhatsApp.
+
+Phone and SMS are unchanged: the caller ID is always trusted.
+
+**Safety lock:** `WHATSAPP_NUMBER_MODE=ask` with `VERIFICATION_MODE=none` **refuses to start**
+unless `DCC_BOOKING_URL` contains `UAT` (as in section 5b). Whenever `ask` is on, the server logs
+the startup warning `whatsapp_number_ask`.
+
 ## 6. Safety rules (enforced in code, not left to the AI)
 
 1. **Trusted number only.** The booking tools never take the mobile number as an argument.
    - Phone call, WhatsApp, SMS: the `X-Sa-End-User-Phone` header Perfox sends is trusted.
+     With `WHATSAPP_NUMBER_MODE=ask`, WhatsApp ignores it and works like website chat
+     (section 5c).
    - Website chat: trusted only after OTP in the chat or a login on the test website
      (section 5). Until then the booking tools return
      `verification_needed`. `TRUST_WEB_PHONE=true` skips this for development only, and

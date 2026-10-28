@@ -16,6 +16,7 @@ os.environ["TRUST_WEB_PHONE"] = "false"
 os.environ["DCC_TIMEOUT_SECONDS"] = "1"
 os.environ["OTP_MODE"] = "mock"  # no SMS; the code is always 123456
 os.environ["VERIFICATION_MODE"] = "otp"  # the default; one section switches it to "none"
+os.environ["WHATSAPP_NUMBER_MODE"] = "auto"  # the default; one section switches it to "ask"
 os.environ["DCC_BOOKING_URL"] = "https://drivecarclub.com/CarclubCRMUAT/Api/Home/DespatchedBooking"
 os.environ["KEEP_ALIVE_URL"] = ""  # never ping the real server from tests
 os.environ["ENABLE_DOCS"] = "false"
@@ -41,7 +42,7 @@ from app import browser_sessions, config, fares, identity, otp, sms, tools
 from app.drivecarclub import DriveCarClubClient
 from app.errors import DCCUnavailable, SMSUnavailable
 from app.mapper import INDIA
-from app.server import app, log_startup_warnings
+from app.server import app, check_whatsapp_number_lock, log_startup_warnings
 
 # ----------------------------------------------------------------------
 # Tiny test helpers
@@ -801,6 +802,120 @@ check("none + UAT booking URL (any case) -> starts, with the warning",
       started.returncode == 0 and "Verification is OFF" in started.stdout, started.stdout + started.stderr)
 started = start_server(VERIFICATION_MODE="otp", DCC_BOOKING_URL=PROD_URL)
 check("otp + non-UAT booking URL -> starts", started.returncode == 0, started.stdout + started.stderr)
+
+# ----------------------------------------------------------------------
+# 6c. WHATSAPP_NUMBER_MODE: "auto" (default) and "ask"
+# ----------------------------------------------------------------------
+print("\n--- WHATSAPP_NUMBER_MODE ---")
+
+WA_ASK_SAY = "registered mobile number you booked with (10 digits, no country code needed)"
+
+
+def whatsapp(tool, arguments=None, conversation_id="wa-1", phone="919000000001"):
+    """Call a tool on WhatsApp. The sender's number is 919000000001 (one booking)."""
+    return call(tool, arguments, phone=phone, channel="whatsapp", conversation_id=conversation_id)
+
+
+# "auto" (the default): unchanged, the sender's number is trusted.
+check("WHATSAPP_NUMBER_MODE is auto by default", config.WHATSAPP_NUMBER_MODE == "auto")
+result, text = whatsapp("check_dispatch_status", conversation_id="wa-auto")
+check("auto: whatsapp uses the sender's number -> 'one'", result["outcome"] == "one", text)
+result, text = whatsapp("send_otp", {"mobile_number": "9000000003"}, conversation_id="wa-auto")
+check("auto: send_otp on whatsapp -> not_needed", result["outcome"] == "not_needed", text)
+check("auto: descriptions don't mention WhatsApp for the OTP tools",
+      all("WhatsApp" not in t["description"] for t in tools.listed_tools() if t["name"] in tools.OTP_TOOLS))
+
+# "ask" with VERIFICATION_MODE=otp: the typed number must pass an OTP.
+config.WHATSAPP_NUMBER_MODE = "ask"
+result, text = whatsapp("check_dispatch_status", conversation_id="wa-otp")
+check("ask: whatsapp ignores the sender's number -> verification_needed",
+      result["outcome"] == "verification_needed", text)
+check("ask: verification_needed leaks no booking", "booking" not in result and "Bengaluru" not in text, text)
+check("ask: whatsapp 'say' asks for the registered number (10 digits)", WA_ASK_SAY in result["say"], text)
+check("ask + otp: next_step points to send_otp", "send_otp" in result.get("next_step", ""), text)
+result, text = whatsapp("get_chauffeur_details", {"booking_ref": "DCC100101"}, conversation_id="wa-otp")
+check("ask: get_chauffeur_details on whatsapp -> verification_needed",
+      result["outcome"] == "verification_needed" and "Ramesh" not in text, text)
+result, text = call("check_dispatch_status", phone="919000000001", channel="web", conversation_id="wa-web")
+check("ask: web chat 'say' wording unchanged", WA_ASK_SAY not in result["say"], text)
+
+result, text = whatsapp("send_otp", {"mobile_number": "9000000003"}, conversation_id="wa-otp")
+check("ask + otp: send_otp works on whatsapp", result["outcome"] == "sent", text)
+result, text = whatsapp("check_dispatch_status", conversation_id="wa-otp")
+check("ask + otp: still verification_needed before the code", result["outcome"] == "verification_needed", text)
+result, text = whatsapp("verify_otp", {"code": MOCK_CODE}, conversation_id="wa-otp")
+check("ask + otp: verify_otp works on whatsapp", result["outcome"] == "verified", text)
+result, text = whatsapp("check_dispatch_status", conversation_id="wa-otp")
+check("ask + otp: then the TYPED number is used, not the sender's", result["outcome"] == "none", text)
+
+# Phone and SMS: unchanged, the caller ID is trusted.
+result, text = call("check_dispatch_status", phone="919000000001", channel="phone", conversation_id="wa-phone")
+check("ask: phone still uses the caller ID", result["outcome"] == "one", text)
+result, text = call("check_dispatch_status", phone="919000000001", channel="sms", conversation_id="wa-sms")
+check("ask: sms still uses the caller ID", result["outcome"] == "one", text)
+result, text = call("send_otp", {"mobile_number": "9000000003"}, phone="919000000001", channel="phone",
+                    conversation_id="wa-phone")
+check("ask: send_otp on phone -> not_needed", result["outcome"] == "not_needed", text)
+
+check("ask: OTP tool descriptions mention WhatsApp",
+      all("Website chat and WhatsApp only." in t["description"]
+          for t in tools.listed_tools() if t["name"] in tools.OTP_TOOLS))
+
+log_lines.clear()
+log_startup_warnings()
+check("ask: startup logs the whatsapp_number_ask warning",
+      any('"whatsapp_number_ask"' in line for line in log_lines), log_lines)
+
+# "ask" with VERIFICATION_MODE=none (UAT demos): use_mobile_number on WhatsApp.
+config.VERIFICATION_MODE = "none"
+check("ask + none: use_mobile_number is listed and mentions WhatsApp",
+      any(t["name"] == "use_mobile_number" and "WhatsApp" in t["description"] for t in tools.listed_tools()))
+# The sender's number (919000000003) has no bookings; the typed one has one.
+result, text = whatsapp("check_dispatch_status", conversation_id="wa-none", phone="919000000003")
+check("ask + none: whatsapp -> verification_needed", result["outcome"] == "verification_needed", text)
+check("ask + none: 'say' asks for the registered number, no code",
+      WA_ASK_SAY in result["say"] and "one-time code" not in result["say"] and "SMS" not in result["say"], text)
+check("ask + none: next_step points to use_mobile_number", "use_mobile_number" in result.get("next_step", ""), text)
+result, text = whatsapp("use_mobile_number", {"mobile_number": "12345"}, conversation_id="wa-none",
+                        phone="919000000003")
+check("ask + none: invalid typed number -> invalid_number", result["outcome"] == "invalid_number", text)
+result, text = whatsapp("use_mobile_number", {"mobile_number": "90000 00001"}, conversation_id="wa-none",
+                        phone="919000000003")
+check("ask + none: use_mobile_number on whatsapp -> ok", result["outcome"] == "ok", text)
+check("ask + none: ok -> does not read the number back", "90000" not in text and "0001" not in text, text)
+result, text = whatsapp("check_dispatch_status", conversation_id="wa-none", phone="919000000003")
+check("ask + none: use_mobile_number then check_dispatch_status -> 'one'", result["outcome"] == "one", text)
+result, text = whatsapp("check_dispatch_status", conversation_id="wa-none-other", phone="919000000003")
+check("ask + none: another conversation still needs a number", result["outcome"] == "verification_needed", text)
+
+# The safety lock, in this process (the VERIFICATION_MODE lock would stop a
+# real start first, so this one is also checked on its own).
+config.DCC_BOOKING_URL = PROD_URL
+try:
+    check_whatsapp_number_lock()
+    check("ask + none + non-UAT URL -> whatsapp lock refuses", False, "no SystemExit")
+except SystemExit as stop:
+    check("ask + none + non-UAT URL -> whatsapp lock refuses",
+          "Refusing to start" in str(stop) and "WHATSAPP_NUMBER_MODE=ask" in str(stop), str(stop))
+config.VERIFICATION_MODE = "otp"
+try:
+    check_whatsapp_number_lock()
+    check("ask + otp + non-UAT URL -> whatsapp lock allows it", True)
+except SystemExit as stop:
+    check("ask + otp + non-UAT URL -> whatsapp lock allows it", False, str(stop))
+config.DCC_BOOKING_URL = os.environ["DCC_BOOKING_URL"]
+config.WHATSAPP_NUMBER_MODE = "auto"
+
+# ...and in a fresh Python, the way the server really starts.
+started = start_server(WHATSAPP_NUMBER_MODE="ask", VERIFICATION_MODE="none", DCC_BOOKING_URL=PROD_URL)
+check("ask + none + non-UAT booking URL -> the server refuses to start",
+      started.returncode != 0 and "Refusing to start" in started.stderr, started.stdout + started.stderr)
+started = start_server(WHATSAPP_NUMBER_MODE="ask", VERIFICATION_MODE="none", DCC_BOOKING_URL=PROD_URL.replace("CRM", "CRMUAT"))
+check("ask + none + UAT booking URL -> starts, with the warning",
+      started.returncode == 0 and "whatsapp_number_ask" in started.stdout, started.stdout + started.stderr)
+started = start_server(WHATSAPP_NUMBER_MODE="ask", VERIFICATION_MODE="otp", DCC_BOOKING_URL=PROD_URL)
+check("ask + otp + non-UAT booking URL -> starts, with the warning",
+      started.returncode == 0 and "whatsapp_number_ask" in started.stdout, started.stdout + started.stderr)
 
 # ----------------------------------------------------------------------
 # 7. Logging
