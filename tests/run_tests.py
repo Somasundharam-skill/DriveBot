@@ -21,6 +21,7 @@ os.environ["DCC_BOOKING_URL"] = "https://drivecarclub.com/CarclubCRMUAT/Api/Home
 os.environ["KEEP_ALIVE_URL"] = ""  # never ping the real server from tests
 os.environ["ENABLE_DOCS"] = "false"
 os.environ["INCLUDE_PAST_BOOKINGS"] = "false"  # the default; one test switches it on
+os.environ["MOCK_NUMBER_SCENARIOS"] = ""  # the default; section 11a fills it with FAKE numbers
 os.environ["PICKUP_AREA_FIELD"] = "city_Name"
 for fare_list in ("FARE_CAR_CATEGORIES", "FARE_SERVICE_TYPES", "FARE_CITIES"):
     os.environ[fare_list] = ""  # no allow-lists; one test fills FARE_CITIES
@@ -1358,6 +1359,137 @@ fare()
 check("both live: the booking tools and get_fare share one client",
       tools.get_client() is tools.get_rate_client())
 check("both live: one token used for both APIs", counts["token"] == before["token"] + 1, counts)
+
+# ----------------------------------------------------------------------
+# 11a. MOCK_NUMBER_SCENARIOS: fake bookings for chosen test numbers
+# (fake numbers only); every other number still uses DCC_MODE.
+# ----------------------------------------------------------------------
+print("\n--- MOCK_NUMBER_SCENARIOS ---")
+
+MOCK_NUMBERS = {"today": "919000000101", "several": "919000000102", "not_allocated": "919000000103",
+                "none": "919000000104", "down": "919000000105", "slow": "919000000106"}
+config.MOCK_NUMBER_SCENARIOS = ["919000000101=sunny", "12345=today", "919000000104=none"]
+check("an unreadable entry is reported by its position", tools.mock.mock_numbers()[1] == [1, 2],
+      tools.mock.mock_numbers()[1])
+# Written in different formats, to prove they are normalised.
+config.MOCK_NUMBER_SCENARIOS = ["+91 90000 00101=today", "09000000102=several", "9000000103 = not_allocated",
+                                "919000000104=none", "0091 9000000105=DOWN", "919000000106=slow"]
+check("mock numbers are normalised",
+      tools.mock.mock_numbers() == ({number: scenario for scenario, number in MOCK_NUMBERS.items()}, []))
+
+use_modes("live", "mock")  # every other number goes to the fake DriveCarClub server
+log_lines.clear()
+before = dict(counts)
+
+
+def mock_call(scenario, tool="check_dispatch_status", arguments=None, channel="phone"):
+    return call(tool, arguments, phone=MOCK_NUMBERS[scenario], channel=channel,
+                conversation_id=f"mock-{scenario}")
+
+
+result, text = mock_call("today")
+check("today: one booking, chauffeur allocated",
+      result["outcome"] == "one" and result["booking"]["booking_ref"] == "MOCK-1001"
+      and result["booking"]["chauffeur_allocated"] is True, text)
+result, text = mock_call("today", "get_chauffeur_details", {"booking_ref": "MOCK-1001"})
+check("today: chauffeur details shared (first name only)",
+      result["outcome"] == "shared" and result["chauffeur"]["chauffeur_first_name"] == "Rajesh"
+      and result["chauffeur"]["car_model"] == "Swift Dzire"
+      and result["chauffeur"]["registration_number"] == "KA00MK0001" and "TEST" not in text, text)
+
+result, text = mock_call("several")
+check("several: today and tomorrow, earliest first",
+      result["outcome"] == "several"
+      and [b["booking_ref"] for b in result["bookings"]] == ["MOCK-2001", "MOCK-2002"], text)
+result, text = mock_call("several", "get_chauffeur_details", {"booking_ref": "MOCK-2001"})
+check("several: today's booking has its own chauffeur and car",
+      result["outcome"] == "shared" and result["chauffeur"]["chauffeur_first_name"] == "Sunil"
+      and result["chauffeur"]["car_model"] == "Toyota Innova Crysta", text)
+result, text = mock_call("several", "get_chauffeur_details", {"booking_ref": "MOCK-2002"})
+check("several: tomorrow's booking has a different chauffeur and car",
+      result["outcome"] == "shared" and result["chauffeur"]["chauffeur_first_name"] == "Vikram"
+      and result["chauffeur"]["car_model"] == "Honda City", text)
+
+result, text = mock_call("not_allocated")
+check("not_allocated: one booking tomorrow, no chauffeur yet",
+      result["outcome"] == "one" and result["booking"]["booking_ref"] == "MOCK-3001"
+      and result["booking"]["chauffeur_allocated"] is False, text)
+result, text = mock_call("not_allocated", "get_chauffeur_details", {"booking_ref": "MOCK-3001"})
+check("not_allocated: get_chauffeur_details -> not_allocated", result["outcome"] == "not_allocated", text)
+
+result, text = mock_call("none")
+check("none: no bookings", result["outcome"] == "none", text)
+result, text = mock_call("none", "get_chauffeur_details", {"booking_ref": "MOCK-1001"})
+check("none: another scenario's booking -> not_found", result["outcome"] == "not_found", text)
+
+for scenario, reason in (("down", "server_error"), ("slow", "timeout")):
+    for tool, arguments in (("check_dispatch_status", None), ("get_chauffeur_details", {"booking_ref": "MOCK-1001"})):
+        result, text = mock_call(scenario, tool, arguments)
+        check(f"{scenario}: {tool} -> unavailable / {reason}",
+              result["outcome"] == "unavailable" and result.get("reason") == reason, text)
+check("down: alert_perfox_team is logged, with source mock_number",
+      any('"alert_perfox_team"' in line and '"source": "mock_number"' in line for line in log_lines))
+
+result, text = mock_call("today", channel="whatsapp")
+check("works on WhatsApp", result["outcome"] == "one" and result["booking"]["booking_ref"] == "MOCK-1001", text)
+config.TRUST_WEB_PHONE = True  # stands in for a verified website chat number
+result, text = mock_call("today", channel="web")
+config.TRUST_WEB_PHONE = False
+check("works on website chat", result["outcome"] == "one" and result["booking"]["booking_ref"] == "MOCK-1001", text)
+check("mock numbers never call DriveCarClub",
+      counts["bookings"] == before["bookings"] and counts["token"] == before["token"], counts)
+
+mock_logs = [json.loads(line) for line in log_lines if '"tool_call"' in line]
+check("every mock answer is logged with source mock_number",
+      len(mock_logs) == 15 and all(entry.get("source") == "mock_number" for entry in mock_logs), mock_logs)
+
+log_lines.clear()
+result, text = call("check_dispatch_status", phone="919000000001")
+check("a non-mock number still uses the live API",
+      result["outcome"] == "one" and result["booking"]["booking_ref"] == "LIVE1"
+      and counts["bookings"] > before["bookings"], text)
+live_logs = [json.loads(line) for line in log_lines if '"tool_call"' in line]
+check("a non-mock number's log line has no source", live_logs and "source" not in live_logs[0], live_logs)
+
+log_lines.clear()
+log_startup_warnings()
+mock_warnings = [json.loads(line) for line in log_lines if '"mock_numbers_on"' in line]
+check("startup warns with the count of mock numbers", mock_warnings and mock_warnings[0]["count"] == 6, log_lines)
+
+
+def has_mock_number(text):
+    """True if any mock number (with or without 91) is in the text."""
+    return any(number in text or number[2:] in text for number in MOCK_NUMBERS.values())
+
+
+check("no log line has a mock number", not any(has_mock_number(line) for line in all_log_lines))
+
+# The safety lock, in a fresh Python (settings are read once at import).
+UAT_URL = PROD_URL.replace("CRM", "CRMUAT")
+started = start_server(MOCK_NUMBER_SCENARIOS="919000000101=today,919000000105=down", DCC_BOOKING_URL=PROD_URL)
+check("mock numbers + non-UAT booking URL -> the server refuses to start",
+      started.returncode != 0 and "Refusing to start: MOCK_NUMBER_SCENARIOS" in started.stderr,
+      started.stdout + started.stderr)
+check("refusal output has no mock number", not has_mock_number(started.stdout + started.stderr))
+started = start_server(MOCK_NUMBER_SCENARIOS="919000000101=today,919000000105=down", DCC_BOOKING_URL=UAT_URL)
+check("mock numbers + UAT booking URL -> starts, warning with the count",
+      started.returncode == 0 and '"mock_numbers_on"' in started.stdout and '"count": 2' in started.stdout,
+      started.stdout + started.stderr)
+check("startup output has no mock number", not has_mock_number(started.stdout + started.stderr))
+started = start_server(MOCK_NUMBER_SCENARIOS="919000000101=sunny", DCC_BOOKING_URL=UAT_URL)
+check("unknown scenario -> the server refuses to start, without the number",
+      started.returncode != 0 and "Refusing to start" in started.stderr
+      and not has_mock_number(started.stdout + started.stderr), started.stdout + started.stderr)
+started = start_server(MOCK_NUMBER_SCENARIOS="", DCC_BOOKING_URL=PROD_URL)
+check("empty MOCK_NUMBER_SCENARIOS + non-UAT URL -> starts, no warning",
+      started.returncode == 0 and "mock_numbers_on" not in started.stdout, started.stdout + started.stderr)
+
+config.MOCK_NUMBER_SCENARIOS = []
+before = dict(counts)
+result, text = call("check_dispatch_status", phone=MOCK_NUMBERS["today"])
+check("setting empty -> the number follows DCC_MODE again (the live API)",
+      result["outcome"] == "one" and result["booking"]["booking_ref"] == "LIVE1"
+      and counts["bookings"] > before["bookings"], text)
 
 for name, value in saved_settings.items():
     setattr(config, name, value)

@@ -19,12 +19,16 @@ Test numbers:
   919000000006  timeout
 
 Fares (get_fare): see _RATES below, for example Midsize / Local / Gurugram.
+
+Per-number scenarios (MOCK_NUMBER_SCENARIOS, UAT testing only): chosen
+test numbers get one of the SCENARIOS below in ANY mode, while every other
+number follows DCC_MODE. See MockNumberScenarios at the end.
 """
 
 import time
 from datetime import datetime, timedelta
 
-from app import config, mapper
+from app import config, identity, mapper
 from app.errors import DCCUnavailable
 from app.mapper import INDIA
 
@@ -139,4 +143,72 @@ class MockDriveCarClub:
         """Fake GetRate API: the packages for a known combination, else an empty list."""
         key = (car_category.lower(), service_type.lower(), city_name.lower())
         response = {"status": "200", "message": "Success", "data": _RATES.get(key, [])}
+        return mapper.unwrap_response_list(response)
+
+
+# ----------------------------------------------------------------------
+# Per-number scenarios (MOCK_NUMBER_SCENARIOS, UAT testing only)
+# Same raw DespatchedBooking format as above, so the data goes through the
+# same mapping and today/upcoming filter as live data. Booking refs start
+# with "MOCK-"; names and registrations are obviously fake.
+# ----------------------------------------------------------------------
+SCENARIOS = {
+    "today": lambda: [
+        _booking("MOCK-1001", 0, "18:30", "Bengaluru", "Despatched",
+                 "RAJESH TEST", "9000000000", "Swift Dzire", "KA00MK0001"),
+    ],
+    "several": lambda: [
+        _booking("MOCK-2001", 0, "11:00", "Indiranagar", "Despatched",
+                 "SUNIL TEST", "9000000000", "Toyota Innova Crysta", "KA00MK0002"),
+        _booking("MOCK-2002", 1, "07:45", "Koramangala", "Despatched",
+                 "VIKRAM TEST", "9000000000", "Honda City", "KA00MK0003"),
+    ],
+    "not_allocated": lambda: [
+        _booking("MOCK-3001", 1, "09:30", "Jayanagar", "Despatched"),
+    ],
+    "none": lambda: [],
+    "down": None,  # DriveCarClub server error
+    "slow": None,  # DriveCarClub does not answer in time
+}
+
+
+def mock_numbers():
+    """Read MOCK_NUMBER_SCENARIOS.
+
+    Returns ({normalised number: scenario}, positions of unreadable entries).
+    The positions (1, 2, ...) are what errors show: never the numbers.
+    """
+    numbers, bad = {}, []
+    for position, entry in enumerate(config.MOCK_NUMBER_SCENARIOS, start=1):
+        raw_number, _, scenario = entry.partition("=")
+        number = identity.normalise_phone(raw_number)
+        scenario = scenario.strip().lower()
+        if number is None or scenario not in SCENARIOS:
+            bad.append(position)
+        else:
+            numbers[number] = scenario
+    return numbers, bad
+
+
+def scenario_for(mobile):
+    """The MOCK_NUMBER_SCENARIOS scenario for "91XXXXXXXXXX", or None."""
+    if not mobile or not config.MOCK_NUMBER_SCENARIOS:
+        return None
+    return mock_numbers()[0].get(mobile)
+
+
+class MockNumberScenarios:
+    """Same get_bookings as the other clients, for MOCK_NUMBER_SCENARIOS numbers."""
+
+    source = "mock_number"  # shown in the booking tool log line
+
+    def get_bookings(self, contact_no):
+        scenario = scenario_for(contact_no)
+        if scenario == "down":
+            raise DCCUnavailable("server_error")
+        if scenario == "slow":
+            time.sleep(config.DCC_TIMEOUT_SECONDS)
+            raise DCCUnavailable("timeout")
+        data = SCENARIOS[scenario]() if scenario else []
+        response = {"status": "200", "message": "Success", "data": data}
         return mapper.unwrap_response_list(response)

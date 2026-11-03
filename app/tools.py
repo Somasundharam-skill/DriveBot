@@ -27,7 +27,7 @@ fares are not personal data, and it never guesses a fare.
 
 import time
 
-from app import browser_sessions, config, fares, identity, log, mapper, messages, otp
+from app import browser_sessions, config, fares, identity, log, mapper, messages, mock, otp
 from app.errors import DCCUnavailable, SMSUnavailable
 
 # ----------------------------------------------------------------------
@@ -363,12 +363,26 @@ def get_rate_client():
     return _rate_client
 
 
+_mock_numbers = mock.MockNumberScenarios()  # for MOCK_NUMBER_SCENARIOS numbers
+
+
+def booking_client_for(mobile):
+    """The client for this caller's bookings.
+
+    A MOCK_NUMBER_SCENARIOS test number gets its fake scenario, and
+    DriveCarClub is never called for it. Every other number follows DCC_MODE.
+    """
+    if mock.scenario_for(mobile):
+        return _mock_numbers
+    return get_client()
+
+
 def load_current_bookings(mobile):
     """Fetch the caller's bookings and keep only today's and upcoming ones.
 
     Raises DCCUnavailable if DriveCarClub fails.
     """
-    raw_bookings = get_client().get_bookings(mobile)
+    raw_bookings = booking_client_for(mobile).get_bookings(mobile)
     bookings, skipped = mapper.current_bookings(raw_bookings)
     if skipped:
         # Probably a field name we don't know yet: update FIELD_MAP in mapper.py.
@@ -849,6 +863,8 @@ def call_tool(name, arguments, caller):
     booking_ref = (arguments or {}).get("booking_ref") if name == "get_chauffeur_details" else None
 
     mobile, problem = identity.find_trusted_mobile(caller)
+    # Marks the log lines when a MOCK_NUMBER_SCENARIOS scenario answered.
+    source = {"source": "mock_number"} if not problem and mock.scenario_for(mobile) else {}
     try:
         if problem == "verification_needed":
             result = _verification_needed_result(caller)
@@ -860,7 +876,7 @@ def call_tool(name, arguments, caller):
             result = get_chauffeur_details(mobile, booking_ref)
     except DCCUnavailable as failure:
         log.alert_perfox_team(
-            failure.reason, tool=name, conversation_id=caller.get("conversation_id")
+            failure.reason, tool=name, conversation_id=caller.get("conversation_id"), **source
         )
         result = _unavailable_result(failure.reason)
     except Exception as crash:  # a bug in our code: still never guess
@@ -885,6 +901,7 @@ def call_tool(name, arguments, caller):
         outcome=result["outcome"],
         reason=result.get("reason"),
         duration_ms=round((time.monotonic() - started) * 1000),
+        **source,
     )
     return result
 

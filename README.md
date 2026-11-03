@@ -122,6 +122,7 @@ still accepted after the real ones.
 |---|---|
 | `PICKUP_AREA_FIELD` | `city_Name` (default) or `location`: which field is read out as the pickup area. DriveCarClub hasn't confirmed which is right. Any other value is ignored (with a startup warning). |
 | `INCLUDE_PAST_BOOKINGS` | **UAT testing only.** `true` also shows pickups before today (the UAT test booking is in the past). Default `false`; a warning is logged at startup when it is `true`. |
+| `MOCK_NUMBER_SCENARIOS` | **UAT testing only.** Fake bookings for chosen test numbers, in any `DCC_MODE` (section 4a). Default empty. |
 
 `OTP_MODE=mock` (the default) sends no SMS, and the code is always **123456**.
 `OTP_MODE=plivo` sends real SMS messages. See section 5 below.
@@ -139,6 +140,44 @@ Dates are always worked out from today in India time.
 | 919000000004 | One booking tomorrow, chauffeur not assigned yet |
 | 919000000005 | DriveCarClub server error |
 | 919000000006 | DriveCarClub does not answer in time (timeout) |
+
+### 4a. Mock bookings for chosen numbers (`MOCK_NUMBER_SCENARIOS`, UAT testing only)
+
+To test with real phones on UAT while every other number uses the live API, give chosen
+test numbers a fake scenario:
+
+```
+MOCK_NUMBER_SCENARIOS=919000000101=today,919000000102=several
+```
+
+Comma-separated `number=scenario` pairs. Numbers can be written in any Indian format
+(`+91 90000 00101`, `09000000101`, ...); they are normalised like caller numbers. For these
+numbers DriveCarClub is **never called**, on every channel (phone, WhatsApp, website chat);
+all other numbers follow `DCC_MODE` as before. Empty (the default) switches it off.
+
+| Scenario | What happens |
+|---|---|
+| `today` | One booking today, chauffeur RAJESH TEST (shared as "Rajesh"), Swift Dzire, KA00MK0001 |
+| `several` | Two bookings: today (SUNIL TEST, Toyota Innova Crysta) and tomorrow (VIKRAM TEST, Honda City) |
+| `not_allocated` | One booking tomorrow, no chauffeur or car yet |
+| `none` | No bookings |
+| `down` | DriveCarClub server error (`unavailable`, with an `alert_perfox_team` line) |
+| `slow` | DriveCarClub timeout (waits `DCC_TIMEOUT_SECONDS`, then `unavailable`) |
+
+The fake bookings use the real UAT field names and formats (`actual_bk_num`, `reportingDate`
+as DD-MM-YYYY, `reportingTime`, `city_Name`, `carAlloted`, `carNumber`, `chauffeurName`,
+status `Despatched`), so they go through exactly the same mapping and filtering as live data.
+Dates are worked out from today in India time, so they show without `INCLUDE_PAST_BOOKINGS`.
+Booking references start with `MOCK-`.
+
+- **UAT only.** The server refuses to start if `MOCK_NUMBER_SCENARIOS` is set and
+  `DCC_BOOKING_URL` doesn't contain "UAT" (any case). It also refuses an entry it can't read
+  (a bad number or unknown scenario), naming the entry's position, never the number.
+- At startup it logs a `mock_numbers_on` warning with the **count** of mock numbers (never
+  the numbers).
+- The booking tool log line has `"source": "mock_number"` when a scenario answered (also on
+  the `alert_perfox_team` line for `down` and `slow`). Numbers stay masked as always.
+- Only put test numbers here, never a customer's number, and empty it after testing.
 
 Mock fares (`get_fare`, any phone number or none, any upper/lower case):
 Midsize / Local / Gurugram, Midsize / Local / New Delhi, Premium / Local / Gurugram, and
@@ -364,6 +403,8 @@ the startup warning `whatsapp_number_ask`.
    support phone number. The test website just says "Please call our customer support team."
 8. **Careful logging.** One JSON line per tool call, with the mobile masked (`91******3210`).
    Full numbers, tokens and passwords are never logged.
+9. **Mock numbers only on UAT.** `MOCK_NUMBER_SCENARIOS` (section 4a) won't start unless
+   `DCC_BOOKING_URL` is a UAT URL.
 
 Every tool result has an `outcome` (a fixed code) and a `say` field with the SOP wording
 for DriveBot to use.
@@ -456,7 +497,7 @@ Other outcomes (`verification_needed`, `unavailable`, `not_found`, `invalid_inpu
 | `app/mapper.py` | `FIELD_MAP` (real DriveCarClub field names), date parsing, filtering and the field allowlists |
 | `app/drivecarclub.py` | Live DriveCarClub client: token caching, one retry on 401, timeouts |
 | `app/fares.py` | `get_fare` input checks, GetRate field mapping, and the 1-hour fare cache |
-| `app/mock.py` | Fake data for the test numbers, and fake fares |
+| `app/mock.py` | Fake data for the test numbers, the `MOCK_NUMBER_SCENARIOS` scenarios, and fake fares |
 | `app/config.py` | All settings (read from `.env`) |
 | `app/log.py`, `app/errors.py` | JSON logging, and the "DriveCarClub unavailable" and "SMS unavailable" errors |
 | `tests/run_tests.py` | All tests |

@@ -87,6 +87,14 @@ PICKUP_AREA_FIELD = _text("PICKUP_AREA_FIELD", "city_Name")
 # booking is in the past). Must be "false" in production.
 INCLUDE_PAST_BOOKINGS = _yes_no("INCLUDE_PAST_BOOKINGS")
 
+# UAT TESTING ONLY: fake bookings for chosen test numbers, as comma-separated
+# "number=scenario" pairs, for example "919000000101=today, 919000000102=none".
+# These numbers get the scenario's fake data (see mock.py) and DriveCarClub
+# is never called for them; every other number follows DCC_MODE. Empty = off.
+# The server refuses to start with this set unless DCC_BOOKING_URL is a UAT
+# URL (see server.py).
+MOCK_NUMBER_SCENARIOS = _list("MOCK_NUMBER_SCENARIOS")
+
 # --- Fares (get_fare tool) ---------------------------------------------
 # Optional allow-lists, comma-separated (for example "Midsize, Premium").
 # Empty = no check, because DriveCarClub hasn't given us the lists yet.

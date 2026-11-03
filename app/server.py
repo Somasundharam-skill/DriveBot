@@ -19,7 +19,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
-from app import config, log, tools, website
+from app import config, log, mock, tools, website
 
 SERVER_INFO = {"name": "drivebot-mcp", "version": "0.1.0"}
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
@@ -229,6 +229,30 @@ def check_whatsapp_number_lock():
         raise SystemExit(f"Refusing to start: {message}")
 
 
+def check_mock_number_lock():
+    """Safety lock: MOCK_NUMBER_SCENARIOS only works against UAT.
+
+    Those numbers get fake bookings, so they must never be mixed with real
+    customer data. If the setting is not empty and DCC_BOOKING_URL doesn't
+    contain "UAT" (any case), the server refuses to start. It also refuses
+    an entry it can't read, so a typo never sends a test number to the live
+    API. Errors give the entry's position, never the number.
+    """
+    if not config.MOCK_NUMBER_SCENARIOS:
+        return
+    if "uat" not in config.DCC_BOOKING_URL.lower():
+        message = ("MOCK_NUMBER_SCENARIOS is only allowed for UAT testing, but DCC_BOOKING_URL is not "
+                   "a UAT URL. Empty MOCK_NUMBER_SCENARIOS, or point DCC_BOOKING_URL at UAT.")
+        log.error("mock_number_lock", note=message)
+        raise SystemExit(f"Refusing to start: {message}")
+    _, bad = mock.mock_numbers()
+    if bad:
+        message = (f"MOCK_NUMBER_SCENARIOS entries {bad} (counting from 1) are not \"number=scenario\" "
+                   f"with a valid mobile number and one of: {', '.join(mock.SCENARIOS)}.")
+        log.error("mock_number_scenarios_invalid", note=message)
+        raise SystemExit(f"Refusing to start: {message}")
+
+
 def log_startup_warnings():
     if config.VERIFICATION_MODE == "none":
         log.warning("verification_off",
@@ -256,6 +280,10 @@ def log_startup_warnings():
     if "live" in (config.DCC_MODE, config.DCC_RATE_MODE) and not (config.DCC_USERNAME and config.DCC_PASSWORD):
         log.warning("missing_dcc_credentials",
                     note="DCC_MODE or DCC_RATE_MODE is live but DCC_USERNAME or DCC_PASSWORD is empty.")
+    mock_count = len(mock.mock_numbers()[0])
+    if mock_count:  # the count only: never the numbers
+        log.warning("mock_numbers_on", count=mock_count,
+                    note=f"MOCK_NUMBER_SCENARIOS: {mock_count} test number(s) get fake bookings. UAT testing only!")
     if config.INCLUDE_PAST_BOOKINGS:
         log.warning("include_past_bookings_on", note="INCLUDE_PAST_BOOKINGS=true: past pickups are shown. UAT testing only!")
     if config.PICKUP_AREA_FIELD not in config.PICKUP_AREA_CHOICES:
@@ -272,6 +300,7 @@ def log_startup_warnings():
 
 check_verification_lock()  # stops here if VERIFICATION_MODE=none outside UAT
 check_whatsapp_number_lock()  # (in practice already caught by the lock above)
+check_mock_number_lock()  # stops here if MOCK_NUMBER_SCENARIOS is set outside UAT
 log_startup_warnings()
 
 # Static files from web/ (index.html at "/"). Added LAST, so /mcp, /health,
