@@ -289,6 +289,13 @@ def log_startup_warnings():
     if config.PICKUP_AREA_FIELD not in config.PICKUP_AREA_CHOICES:
         log.warning("unknown_pickup_area_field",
                     note=f"PICKUP_AREA_FIELD={config.PICKUP_AREA_FIELD!r} is not city_Name or location; using city_Name.")
+    if config.WA_SUMMARY_MODE == "live":
+        if not (config.PERFOX_API_BASE and config.PERFOX_API_KEY and config.PERFOX_AGENT_ID):
+            log.warning("missing_perfox_settings",
+                        note="WA_SUMMARY_MODE=live but a PERFOX_* setting is empty: no WhatsApp summary can be sent.")
+    elif config.WA_SUMMARY_MODE != "mock":
+        log.warning("unknown_wa_summary_mode",
+                    note=f"WA_SUMMARY_MODE={config.WA_SUMMARY_MODE!r} is not mock or live; using mock.")
     if config.OTP_MODE == "plivo":
         if not (config.PLIVO_AUTH_ID and config.PLIVO_AUTH_TOKEN and config.PLIVO_SENDER_ID):
             log.warning("missing_plivo_settings", note="OTP_MODE=plivo but a PLIVO_* setting is empty: no code can be sent.")

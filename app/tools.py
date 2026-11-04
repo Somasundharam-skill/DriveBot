@@ -6,6 +6,8 @@
   use_mobile_number       UAT DEMOS ONLY (VERIFICATION_MODE=none): the typed
                           number is trusted without a code
   get_fare                "How much does a car cost?" (standard rates)
+  send_call_summary       Phone calls only: the end-of-call WhatsApp summary
+                          (chauffeur details or a fare), to the caller's own number
 
 Which tools are listed depends on VERIFICATION_MODE (see listed_tools):
 "otp" lists send_otp and verify_otp, "none" lists use_mobile_number.
@@ -27,8 +29,9 @@ fares are not personal data, and it never guesses a fare.
 
 import time
 
-from app import browser_sessions, config, fares, identity, log, mapper, messages, mock, otp
-from app.errors import DCCUnavailable, SMSUnavailable
+from app import (browser_sessions, call_summary, config, fares, identity, log, mapper, messages, mock,
+                 otp, perfox)
+from app.errors import DCCUnavailable, OutboundFailed, SMSUnavailable
 
 # ----------------------------------------------------------------------
 # The customer support number is NOT kept on this server: it lives only in
@@ -230,12 +233,59 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "send_call_summary",
+        "description": (
+            "Phone calls only. Sends the caller a short WhatsApp summary of their chauffeur "
+            "details or of a fare. Call this ONLY at the end of a phone call, after the caller "
+            "has agreed to receive a WhatsApp summary; never send one without asking first. "
+            "It always goes to the number the caller is calling from: you never choose, ask "
+            "for or pass a number. Use topic 'chauffeur' with the booking_ref from "
+            "check_dispatch_status, or topic 'fare' with the same car_category, trip_type and "
+            "city the caller gave for get_fare. The result has an 'outcome' (sent, "
+            "not_available, not_allocated, incomplete, too_many_requests, failed) and a 'say' "
+            "field: tell the caller what 'say' says, in their language. When the outcome is "
+            "'sent', tell the caller it's on its way. When it is 'failed', apologise, say the "
+            "summary couldn't be sent, and offer to read the details out loud."
+            + SUPPORT_HINT
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "enum": ["chauffeur", "fare"],
+                    "description": "What the summary is about: 'chauffeur' or 'fare'.",
+                },
+                "booking_ref": {
+                    "type": "string",
+                    "description": "Topic 'chauffeur' only: the booking_ref exactly as returned by "
+                    "check_dispatch_status.",
+                },
+                "car_category": {
+                    "type": "string",
+                    "description": "Topic 'fare' only: the type of car, as given to get_fare.",
+                },
+                "trip_type": {
+                    "type": "string",
+                    "description": "Topic 'fare' only: the type of trip, as given to get_fare (service_type).",
+                },
+                "city": {
+                    "type": "string",
+                    "description": "Topic 'fare' only: the city, as given to get_fare (city_name).",
+                },
+            },
+            "required": ["topic"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 BOOKING_TOOLS = ("check_dispatch_status", "get_chauffeur_details")
 OTP_TOOLS = ("send_otp", "verify_otp")
 NO_OTP_TOOLS = ("use_mobile_number",)  # VERIFICATION_MODE=none only
 FARE_TOOLS = ("get_fare",)
+SUMMARY_TOOLS = ("send_call_summary",)
 
 
 def listed_tools():
@@ -838,6 +888,188 @@ def _fare_unavailable_result(reason):
 
 
 # ----------------------------------------------------------------------
+# Tool 7: send_call_summary (end-of-call WhatsApp summary, phone calls only)
+# The recipient is ONLY the trusted caller number (X-Sa-End-User-Phone):
+# the AI can never choose or pass a number. Parameters and limits are in
+# call_summary.py, the sending in perfox.py.
+# ----------------------------------------------------------------------
+
+
+def _summary_result(outcome, say, reason=None):
+    result = {"outcome": outcome, "say": say}
+    if reason:
+        result["reason"] = reason  # a short code for the log, never shown to the caller
+    return result
+
+
+def _summary_not_available(reason):
+    return _summary_result(
+        "not_available", "I'm sorry, I can't send a WhatsApp summary for this. "
+        "I can read the details out to you instead, if you like.", reason,
+    )
+
+
+def _summary_incomplete():
+    return _summary_result(
+        "incomplete", "I'm sorry, I don't have all the details for a WhatsApp summary, so I "
+        "haven't sent one. I can read out the details I have, if you like.",
+    )
+
+
+def _summary_failed(reason):
+    return {
+        **_summary_result(
+            "failed", "I'm sorry, I couldn't send the WhatsApp summary. "
+            "Would you like me to read the details out to you instead?", reason,
+        ),
+        "next_step": (
+            "If the caller says yes, read out the details from get_chauffeur_details or "
+            "get_fare. Do not try send_call_summary again."
+        ),
+    }
+
+
+def _chauffeur_summary_parameters(mobile, booking_ref):
+    """(problem result, None), or (None, the 5 template parameters)."""
+    wanted = (booking_ref or "").strip().lower()
+    if not wanted:
+        return _summary_incomplete(), None
+    # Fetch again and check the booking belongs to THIS caller (as get_chauffeur_details).
+    bookings = load_current_bookings(mobile)
+    booking = next((b for b in bookings if b["booking_ref"].lower() == wanted), None)
+    if booking is None:
+        return _summary_not_available("not_found"), None  # not theirs: reveal nothing
+    if not mapper.is_chauffeur_allocated(booking):
+        return _summary_result(
+            "not_allocated", "Your chauffeur hasn't been assigned yet, so there's no summary to "
+            "send. You'll get the details once they are.",
+        ), None
+    parameters = call_summary.chauffeur_parameters(booking)
+    if parameters is None:
+        return _summary_incomplete(), None
+    return None, parameters
+
+
+def _fare_summary_parameters(arguments):
+    """(problem result, None), or (None, the 4 template parameters)."""
+    inputs = {
+        "car_category": arguments.get("car_category"),
+        "service_type": arguments.get("trip_type"),
+        "city_name": arguments.get("city"),
+    }
+    # The same checks, mapping and 1-hour cache as get_fare. May raise DCCUnavailable.
+    fare = get_fare(inputs, {})
+    if fare["outcome"] != "found":
+        return _summary_incomplete(), None  # a missing input or no rate: never guess
+    first = fare["packages"][0]
+    parameters = call_summary.fare_parameters(
+        first["car_category"] or inputs["car_category"],
+        first["service_type"] or inputs["service_type"],
+        first["city"] or inputs["city_name"],
+        fare["packages"],
+    )
+    if parameters is None:
+        return _summary_incomplete(), None
+    return None, parameters
+
+
+def send_call_summary(caller, arguments, log_details):
+    """Send the end-of-call WhatsApp summary to the caller's own number.
+
+    Fills "log_details" as it goes (topic, mobile, template, parameter
+    count, provider status), so the log line has them even if sending
+    fails. Raises DCCUnavailable or OutboundFailed if something fails.
+    """
+    arguments = arguments or {}
+    topic = str(arguments.get("topic") or "").strip().lower()
+
+    # 1. Phone calls only, and only to the trusted caller number. Any number
+    #    in "arguments" is never read.
+    if identity.channel_of(caller) != "phone":
+        return _summary_not_available("not_phone")
+    mobile = identity.normalise_phone(caller.get("phone"))
+    if not mobile:
+        return _summary_not_available("no_trusted_number")
+    log_details["mobile"] = mobile
+    if topic not in call_summary.TOPICS:
+        return _summary_not_available("unknown_topic")
+    log_details["topic"] = topic
+
+    # 2. The topic's approved template must be set up.
+    template_name, language = call_summary.template_for(topic)
+    if not template_name:
+        return _summary_not_available("no_template")
+    log_details["template"] = template_name
+
+    # 3. Limits: counted now, and given back below if nothing is sent.
+    session = identity.get_session(caller.get("conversation_id"))
+    day = call_summary.reserve(session, topic, mobile)
+    if day is None:
+        return _summary_result(
+            "too_many_requests", "I've already sent the WhatsApp summaries I can for now, so I "
+            "can't send another one. I can read the details out to you instead, if you like.",
+        )
+    sent = False
+    try:
+        # 4. Build the parameters (all or nothing), then send.
+        if topic == "chauffeur":
+            problem, parameters = _chauffeur_summary_parameters(mobile, arguments.get("booking_ref"))
+        else:
+            problem, parameters = _fare_summary_parameters(arguments)
+        if problem:
+            return problem
+        log_details["parameter_count"] = len(parameters)
+        log_details["provider_status"] = perfox.send_template("+" + mobile, template_name, language, parameters)
+        sent = True
+        return _summary_result(
+            "sent", "I've sent the summary to you on WhatsApp. It's on its way to the number "
+            "you're calling from.",
+        )
+    finally:
+        if not sent:
+            call_summary.release(session, topic, mobile, day)
+
+
+def _call_summary_tool(name, arguments, caller):
+    """Run send_call_summary and log it WITHOUT the parameter values or the number."""
+    started = time.monotonic()
+    details = {}  # filled by send_call_summary
+    try:
+        result = send_call_summary(caller, arguments, details)
+    except DCCUnavailable as failure:
+        result = _summary_failed(failure.reason)
+    except OutboundFailed as failure:
+        details["provider_status"] = failure.provider_status
+        result = _summary_failed(failure.reason)
+    except Exception as crash:  # a bug in our code
+        # No message: it could contain a parameter value.
+        result = _summary_failed("internal_error")
+        details["error"] = type(crash).__name__
+
+    if result["outcome"] == "failed":
+        log.alert_perfox_team(
+            result["reason"], tool=name, conversation_id=caller.get("conversation_id"),
+            topic=details.get("topic"), provider_status=details.get("provider_status"),
+            error=details.get("error"),
+        )
+    log.info(
+        "tool_call",
+        tool=name,
+        conversation_id=caller.get("conversation_id"),
+        channel=caller.get("channel"),
+        topic=details.get("topic"),
+        mobile=log.mask_mobile(details.get("mobile") or identity.normalise_phone(caller.get("phone"))),
+        template=details.get("template"),
+        parameter_count=details.get("parameter_count"),
+        provider_status=details.get("provider_status"),  # "mock", "sent", "suppressed", "http_422"...
+        outcome=result["outcome"],
+        reason=result.get("reason"),
+        duration_ms=round((time.monotonic() - started) * 1000),
+    )
+    return result
+
+
+# ----------------------------------------------------------------------
 # One entry point for tools/call: identity check, run, log.
 # ----------------------------------------------------------------------
 
@@ -856,6 +1088,8 @@ def call_tool(name, arguments, caller):
         return _call_otp_tool(name, arguments, caller)
     if name in FARE_TOOLS:
         return _call_fare_tool(name, arguments, caller)
+    if name in SUMMARY_TOOLS:
+        return _call_summary_tool(name, arguments, caller)
     if name not in BOOKING_TOOLS:
         raise UnknownTool(name)
 

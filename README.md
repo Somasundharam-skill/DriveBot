@@ -12,6 +12,7 @@ through these tools:
 | `verify_otp` | SOP 5 rule 1 | Website chat (and WhatsApp with `WHATSAPP_NUMBER_MODE=ask`): checks the code, then the number is trusted |
 | `use_mobile_number` | | **UAT demos only** (`VERIFICATION_MODE=none`): website chat (and WhatsApp with `ask`) trusts the typed number, no code (sections 5b, 5c) |
 | `get_fare` | | "How much does a car cost?" Standard rates for a car type, trip type and city (section 6a) |
+| `send_call_summary` | | **Phone calls only.** At the end of a call, sends the caller a WhatsApp summary (chauffeur details or a fare) with an approved template (section 6c) |
 
 Nothing else (booking, cancellation, payments) is built yet.
 
@@ -405,6 +406,8 @@ the startup warning `whatsapp_number_ask`.
    Full numbers, tokens and passwords are never logged.
 9. **Mock numbers only on UAT.** `MOCK_NUMBER_SCENARIOS` (section 4a) won't start unless
    `DCC_BOOKING_URL` is a UAT URL.
+10. **WhatsApp summaries go only to the caller.** `send_call_summary` works on phone calls only
+    and sends only to the trusted caller number; the AI can't choose a number (section 6c).
 
 Every tool result has an `outcome` (a fixed code) and a `say` field with the SOP wording
 for DriveBot to use.
@@ -481,6 +484,67 @@ Other outcomes (`verification_needed`, `unavailable`, `not_found`, `invalid_inpu
   shows the pickup area. These are in `message` only. The `booking` and `chauffeur` fields
   keep their old allowlists (section 6, rule 3).
 
+## 6c. WhatsApp call summary: `send_call_summary`
+
+At the end of a phone call, DriveBot can send the caller a short WhatsApp summary. It uses an
+approved WhatsApp template, sent through Perfox's Outbound API
+(`POST {PERFOX_API_BASE}/api/v1/outbound`, `Authorization: Bearer {PERFOX_API_KEY}`).
+The tool description tells the AI to call it **only at the end of a phone call, after the caller
+agreed** to receive a summary.
+
+`send_call_summary(topic, booking_ref, car_category, trip_type, city)`. `topic` is `chauffeur`
+or `fare`; the rest are optional and depend on the topic.
+
+- **Phone calls only.** On any other channel the outcome is `not_available`.
+- **Only the caller's own number.** The message goes to the trusted caller number from
+  `X-Sa-End-User-Phone`, as E.164 (`+919876543210`). The tool has no number argument, and any
+  number the AI passes anyway is ignored.
+- **Topic `chauffeur`:** fetches the caller's bookings again (same filters as the booking tools),
+  checks the `booking_ref` is theirs (any upper/lower case; otherwise `not_available`, revealing
+  nothing) and needs an allocated chauffeur (otherwise `not_allocated`). Parameters, in order:
+  booking ref; pickup as `05 Aug 2026, 6:30 PM, Bengaluru`; chauffeur **first name**; car model;
+  registration number.
+- **Topic `fare`:** runs the `get_fare` logic (same input checks and 1-hour cache) with
+  `car_category`, `trip_type` and `city`. Parameters, in order: car category; trip type; city;
+  one fare line such as `8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)`
+  (only API values; the outstation allowance and night stay are added when above 0).
+- **All or nothing.** If any value is missing (no booking ref, area, model, a fare input, no rate...),
+  nothing is sent and the outcome is `incomplete`.
+- **One line each.** Whitespace in a value is squashed to single spaces, and a parameter with a
+  newline, tab or 4+ spaces is never sent.
+- **Never sent:** the customer's name, the chauffeur's surname or mobile, the address, the VIP flag.
+- Only `template` is sent, never `opening_message` (Perfox answers 400 to both).
+
+| Outcome | When |
+|---|---|
+| `sent` | Perfox answered 201 with `status` `sent` and `send_authorized` true (or mock mode). DriveBot tells the caller it's on its way. |
+| `not_available` | Not a phone call, no caller number, unknown topic, the topic's template name is empty, or the booking isn't the caller's |
+| `not_allocated` | Topic `chauffeur`, no chauffeur assigned yet |
+| `incomplete` | A value is missing, so nothing was sent |
+| `too_many_requests` | Over a limit (below) |
+| `failed` | Anything else: a 201 with `failed` or `suppressed`, `send_authorized` not true, 400, 404, 422 (`agent_not_published`, `no_trigger_for_channel`), any other status, a timeout (5 seconds), Perfox settings missing in live mode, or DriveCarClub failing. DriveBot apologises, says the summary couldn't be sent and offers to read the details out. An `alert_perfox_team` line is logged. |
+
+**Limits (in memory, a restart clears them):** 1 summary per topic per conversation, and 5 per
+number per day (India time). A summary that wasn't sent doesn't count. Set in
+[app/config.py](app/config.py) (`SUMMARY_MAX_PER_NUMBER_PER_DAY`, `PERFOX_TIMEOUT_SECONDS`).
+
+**Logging:** one `tool_call` line with the tool, topic, outcome, masked number, template name,
+parameter count and provider status (`mock`, `sent`, `failed`, `suppressed`, `http_422`...).
+Never the parameter values, the full number or the API key. In mock mode an extra
+`whatsapp_summary_mock` line has only the template name and the parameter count.
+
+| Setting (`.env`) | What it does |
+|---|---|
+| `WA_SUMMARY_MODE` | `mock` (default: nothing is sent) or `live`. Anything else counts as `mock`, with a startup warning. |
+| `PERFOX_API_BASE` | The Perfox API address, for example `https://...` (no `/api/v1/outbound`) |
+| `PERFOX_API_KEY` | **Secret.** The Perfox API key. Never logged. |
+| `PERFOX_AGENT_ID` | The published Perfox agent that sends the message |
+| `WA_TEMPLATE_CHAUFFEUR_NAME`, `WA_TEMPLATE_CHAUFFEUR_LANG` | The chauffeur template and its language (default `en_US`). Empty name = topic off. |
+| `WA_TEMPLATE_FARE_NAME`, `WA_TEMPLATE_FARE_LANG` | The fare template and its language (default `en_US`). Empty name = topic off (`not_available`). |
+
+With `live` and a `PERFOX_*` setting empty, the server logs a `missing_perfox_settings` warning
+at startup.
+
 ## 7. Project layout
 
 | File | What it does |
@@ -489,7 +553,9 @@ Other outcomes (`verification_needed`, `unavailable`, `not_found`, `invalid_inpu
 | `app/website.py` | The test website: serves `web/`, and the login and pickups API |
 | `app/browser_sessions.py` | Website sessions (cookie, chat token, 8-hour expiry) |
 | `web/index.html` | The test page: log in, your pickups, the Perfox chat |
-| `app/tools.py` | The four tools, their descriptions, and the SOP wording |
+| `app/tools.py` | The tools, their descriptions, and the SOP wording |
+| `app/call_summary.py` | `send_call_summary` template parameters and limits |
+| `app/perfox.py` | Sending the WhatsApp template through Perfox's Outbound API (mock or live) |
 | `app/messages.py` | The ready-to-send `message` cards for the booking and fare tools |
 | `app/otp.py` | OTP rules: making, hashing and checking codes, and the limits |
 | `app/sms.py` | Sending the SMS (mock or Plivo) |
@@ -499,7 +565,7 @@ Other outcomes (`verification_needed`, `unavailable`, `not_found`, `invalid_inpu
 | `app/fares.py` | `get_fare` input checks, GetRate field mapping, and the 1-hour fare cache |
 | `app/mock.py` | Fake data for the test numbers, the `MOCK_NUMBER_SCENARIOS` scenarios, and fake fares |
 | `app/config.py` | All settings (read from `.env`) |
-| `app/log.py`, `app/errors.py` | JSON logging, and the "DriveCarClub unavailable" and "SMS unavailable" errors |
+| `app/log.py`, `app/errors.py` | JSON logging, and the "DriveCarClub unavailable", "SMS unavailable" and "WhatsApp summary failed" errors |
 | `tests/run_tests.py` | All tests |
 | `pyproject.toml`, `uv.lock` | Package list and exact locked versions (used by uv) |
 
@@ -522,6 +588,7 @@ These are guesses in the code today. Each one is easy to change when the answer 
 | Production URLs, credentials and rate limits | UAT URLs | `DCC_TOKEN_URL`, `DCC_BOOKING_URL` in `.env` |
 | Share the chauffeur's mobile? (SOP 6 open item 2) | No | `SHARE_CHAUFFEUR_MOBILE` in `app/config.py` |
 | Approved SMS template and sender ID for the OTP | Text from the brief | `OTP_SMS_TEXT`, `PLIVO_SENDER_ID` in `.env` |
+| Approved WhatsApp templates for the call summary (names, languages, parameter order) | Chauffeur: 5 parameters, fare: 4 (section 6c) | `WA_TEMPLATE_*` in `.env`; the order in `app/call_summary.py` |
 
 ## 9. Good to know
 

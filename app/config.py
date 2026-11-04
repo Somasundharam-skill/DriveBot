@@ -125,6 +125,22 @@ PLIVO_AUTH_ID = _text("PLIVO_AUTH_ID")
 PLIVO_AUTH_TOKEN = _text("PLIVO_AUTH_TOKEN")
 PLIVO_SENDER_ID = _text("PLIVO_SENDER_ID")
 
+# --- WhatsApp call summary (send_call_summary tool) --------------------
+# Sent through Perfox's Outbound API with an approved WhatsApp template.
+# "mock" = nothing is sent, only the template name and the number of
+#          parameters are logged (default).
+# "live" = a real WhatsApp message through Perfox.
+# Anything else counts as "mock" (with a startup warning).
+WA_SUMMARY_MODE = _text("WA_SUMMARY_MODE", "mock").lower()
+PERFOX_API_BASE = _text("PERFOX_API_BASE")
+PERFOX_API_KEY = _text("PERFOX_API_KEY")  # secret: never log it
+PERFOX_AGENT_ID = _text("PERFOX_AGENT_ID")
+# The approved template for each topic. An empty name = that topic is off.
+WA_TEMPLATE_CHAUFFEUR_NAME = _text("WA_TEMPLATE_CHAUFFEUR_NAME")
+WA_TEMPLATE_CHAUFFEUR_LANG = _text("WA_TEMPLATE_CHAUFFEUR_LANG") or "en_US"
+WA_TEMPLATE_FARE_NAME = _text("WA_TEMPLATE_FARE_NAME")
+WA_TEMPLATE_FARE_LANG = _text("WA_TEMPLATE_FARE_LANG") or "en_US"
+
 # --- Verification on website chat --------------------------------------
 # "otp"  = the customer proves their number with a code (default).
 # "none" = UAT DEMOS ONLY: no code, the number the customer types is
@@ -162,3 +178,7 @@ OTP_MAX_SENDS = 3               # at most 3 codes sent
 OTP_RESEND_WAIT_SECONDS = 30    # at least 30 seconds between sends
 OTP_MAX_WRONG_ATTEMPTS = 3      # 3 wrong codes = locked
 MOCK_OTP_CODE = "123456"        # the code in OTP_MODE=mock
+
+# WhatsApp call summary limits (kept in memory).
+SUMMARY_MAX_PER_NUMBER_PER_DAY = 5  # and 1 per topic per conversation
+PERFOX_TIMEOUT_SECONDS = 5          # give up on the Outbound API after this

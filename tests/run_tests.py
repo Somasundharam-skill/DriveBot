@@ -25,6 +25,13 @@ os.environ["MOCK_NUMBER_SCENARIOS"] = ""  # the default; section 11a fills it wi
 os.environ["PICKUP_AREA_FIELD"] = "city_Name"
 for fare_list in ("FARE_CAR_CATEGORIES", "FARE_SERVICE_TYPES", "FARE_CITIES"):
     os.environ[fare_list] = ""  # no allow-lists; one test fills FARE_CITIES
+os.environ["WA_SUMMARY_MODE"] = "mock"  # never send a real WhatsApp; section 12a uses a fake Perfox
+for perfox_setting in ("PERFOX_API_BASE", "PERFOX_API_KEY", "PERFOX_AGENT_ID"):
+    os.environ[perfox_setting] = ""
+os.environ["WA_TEMPLATE_CHAUFFEUR_NAME"] = "test_chauffeur_summary"
+os.environ["WA_TEMPLATE_CHAUFFEUR_LANG"] = ""  # empty -> en_US
+os.environ["WA_TEMPLATE_FARE_NAME"] = "test_fare_summary"
+os.environ["WA_TEMPLATE_FARE_LANG"] = "en_GB"
 
 import base64
 import json
@@ -39,9 +46,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from fastapi.testclient import TestClient
 
-from app import browser_sessions, config, fares, identity, messages, otp, sms, tools
+from app import browser_sessions, call_summary, config, fares, identity, messages, otp, perfox, sms, tools
 from app.drivecarclub import DriveCarClubClient
-from app.errors import DCCUnavailable, SMSUnavailable
+from app.errors import DCCUnavailable, OutboundFailed, SMSUnavailable
 from app.mapper import INDIA
 from app.server import app, check_whatsapp_number_lock, log_startup_warnings
 
@@ -135,10 +142,10 @@ check("initialize defaults protocolVersion to 2024-11-05",
 
 response = rpc("tools/list")
 tool_list = response.json()["result"]["tools"]
-check("tools/list returns 5 tools", len(tool_list) == 5)
-check("tools/list has the OTP and fare tools",
+check("tools/list returns 6 tools", len(tool_list) == 6)
+check("tools/list has the OTP, fare and call summary tools",
       {t["name"] for t in tool_list} == {"check_dispatch_status", "get_chauffeur_details", "send_otp", "verify_otp",
-                                         "get_fare"})
+                                         "get_fare", "send_call_summary"})
 check("tools have name, description, input_schema",
       all(t.get("name") and t.get("description") and t.get("input_schema") for t in tool_list))
 
@@ -1629,6 +1636,299 @@ check("cards use real line breaks", sum("\n" in m for m in all_messages) == 10)
 check("booking and fare tool descriptions tell the AI to send 'message' as it is",
       all("send it to the customer exactly as written" in t["description"]
           for t in tools.TOOLS if t["name"] in tools.BOOKING_TOOLS + tools.FARE_TOOLS))
+
+# ----------------------------------------------------------------------
+# 12a. send_call_summary: the end-of-call WhatsApp summary (fake Perfox server)
+# ----------------------------------------------------------------------
+print("\n--- send_call_summary ---")
+
+use_modes("mock", "mock")  # mock bookings and fares
+PERFOX_TEST_KEY = "perfox-secret-key-123"
+perfox_requests = []
+perfox_reply = {"status": 201, "body": {"status": "sent", "send_authorized": True}, "delay": 0}
+
+
+class FakePerfox(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        perfox_requests.append({"path": self.path, "auth": self.headers.get("Authorization"),
+                                "body": json.loads(self.rfile.read(length) or b"{}")})
+        time.sleep(perfox_reply["delay"])
+        data = json.dumps(perfox_reply["body"]).encode()
+        try:
+            self.send_response(perfox_reply["status"])
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        except ConnectionError:
+            pass  # the client already gave up (the timeout test)
+
+
+perfox_server = ThreadingHTTPServer(("127.0.0.1", 0), FakePerfox)
+threading.Thread(target=perfox_server.serve_forever, daemon=True).start()
+perfox_base = f"http://127.0.0.1:{perfox_server.server_address[1]}"
+
+
+def reply_with(status=201, body=None, delay=0):
+    perfox_reply.update(status=status, body=body if body is not None else {"status": "sent", "send_authorized": True},
+                        delay=delay)
+
+
+summary_conversations = iter(range(1, 1000))
+
+
+def summary(arguments, phone="919000000001", channel="phone", conversation_id=None):
+    """Call send_call_summary in a NEW conversation (unless one is given)."""
+    return call("send_call_summary", arguments, phone=phone, channel=channel,
+                conversation_id=conversation_id or f"sum-{next(summary_conversations)}")
+
+
+def summary_logs():
+    return [json.loads(line) for line in log_lines if '"send_call_summary"' in line and '"tool_call"' in line]
+
+
+CHAUFFEUR = {"topic": "chauffeur", "booking_ref": "DCC100101"}
+FARE = {"topic": "fare", "car_category": "Midsize", "trip_type": "Local", "city": "Gurugram"}
+CHAUFFEUR_PARAMETERS = ["DCC100101", f"{TODAY_TEXT}, 6:30 PM, Bengaluru", "Ramesh", "Toyota Innova Crysta",
+                        "KA01AB1234"]
+FARE_PARAMETERS = ["Midsize", "Local - within city limits", "Gurugram",
+                   "8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)"]
+
+check("send_call_summary is listed, phone only, after the caller agreed",
+      any(t["name"] == "send_call_summary" and "Phone calls only" in t["description"]
+          and "ONLY at the end of a phone call" in t["description"] and "agreed" in t["description"]
+          for t in rpc("tools/list").json()["result"]["tools"]))
+summary_tool = next(t for t in tools.TOOLS if t["name"] == "send_call_summary")
+check("send_call_summary takes no phone number argument",
+      not any("mobile" in name or "phone" in name or name == "to" for name in summary_tool["input_schema"]["properties"])
+      and summary_tool["input_schema"]["additionalProperties"] is False)
+
+# --- Mock mode (the default): nothing is sent ---
+call_summary.clear_limits()
+log_lines.clear()
+result, text = summary(CHAUFFEUR)
+check("mock: chauffeur summary -> sent", result["outcome"] == "sent" and "on its way" in result["say"], text)
+check("mock: nothing sent to Perfox", perfox_requests == [])
+mock_lines = [json.loads(line) for line in log_lines if '"whatsapp_summary_mock"' in line]
+check("mock: logs only the template name and the parameter count",
+      len(mock_lines) == 1 and set(mock_lines[0]) == {"ts", "level", "event", "template", "parameter_count"}
+      and mock_lines[0]["template"] == "test_chauffeur_summary" and mock_lines[0]["parameter_count"] == 5, mock_lines)
+check("mock: tool log has provider_status 'mock'", summary_logs()[-1]["provider_status"] == "mock", summary_logs())
+
+# --- Live mode against the fake Perfox server ---
+config.WA_SUMMARY_MODE = "live"
+config.PERFOX_API_BASE = perfox_base + "/"  # a trailing slash is fine
+config.PERFOX_API_KEY = PERFOX_TEST_KEY
+config.PERFOX_AGENT_ID = "agent-test-1"
+reply_with()
+
+call_summary.clear_limits()
+log_lines.clear()
+result, text = summary(CHAUFFEUR)
+sent = perfox_requests[-1] if perfox_requests else {}
+check("chauffeur: sent", result["outcome"] == "sent" and len(perfox_requests) == 1, text)
+check("chauffeur: URL and auth header",
+      sent.get("path") == "/api/v1/outbound" and sent.get("auth") == f"Bearer {PERFOX_TEST_KEY}", sent)
+check("chauffeur: exact JSON shape and parameter order", sent.get("body") == {
+    "agent_id": "agent-test-1", "channel": "whatsapp", "to": "+919000000001",
+    "template": {"name": "test_chauffeur_summary", "language": "en_US", "body_parameters": CHAUFFEUR_PARAMETERS},
+}, sent.get("body"))
+check("chauffeur: no opening_message with the template", "opening_message" not in json.dumps(sent.get("body")))
+line = summary_logs()[-1]
+check("chauffeur: log has tool, topic, outcome, masked number, template, count, provider status",
+      line["tool"] == "send_call_summary" and line["topic"] == "chauffeur" and line["outcome"] == "sent"
+      and line["mobile"] == "91******0001" and line["template"] == "test_chauffeur_summary"
+      and line["parameter_count"] == 5 and line["provider_status"] == "sent", line)
+
+result, text = summary({"topic": "chauffeur", "booking_ref": "dcc100101"})
+check("chauffeur: booking_ref matched in any upper/lower case", result["outcome"] == "sent", text)
+
+fares.clear_cache()
+rate_calls = []
+mock_get_rates = tools.get_rate_client().get_rates
+tools.get_rate_client().get_rates = lambda *inputs: rate_calls.append(inputs) or mock_get_rates(*inputs)
+result, text = summary(FARE)
+sent = perfox_requests[-1]
+check("fare: sent", result["outcome"] == "sent", text)
+check("fare: exact JSON shape and parameter order", sent["body"] == {
+    "agent_id": "agent-test-1", "channel": "whatsapp", "to": "+919000000001",
+    "template": {"name": "test_fare_summary", "language": "en_GB", "body_parameters": FARE_PARAMETERS},
+}, sent["body"])
+summary(FARE)
+check("fare: the second summary comes from the get_fare cache",
+      len(rate_calls) == 1 and perfox_requests[-1]["body"]["template"]["body_parameters"] == FARE_PARAMETERS,
+      rate_calls)
+del tools.get_rate_client().get_rates  # back to the normal mock method
+outstation = summary({"topic": "fare", "car_category": "midsize", "trip_type": "outstation", "city": "gurugram"})[0]
+check("fare: outstation line has the allowance and night stay",
+      outstation["outcome"] == "sent" and perfox_requests[-1]["body"]["template"]["body_parameters"][3]
+      == "250kms per day Rs 4,500 (extra km Rs 18, extra hour Rs 0, outstation allowance Rs 300, night stay Rs 300)",
+      perfox_requests[-1]["body"])
+check("fare line: different extras per package -> each gets its own",
+      call_summary.fare_line([
+          {"package_name": "A", "rate_inr": 100, "extra_km_rate_inr": 1, "extra_hour_rate_inr": 2},
+          {"package_name": "B", "rate_inr": 200, "extra_km_rate_inr": 3, "extra_hour_rate_inr": 4},
+      ]) == "A Rs 100 (extra km Rs 1, extra hour Rs 2); B Rs 200 (extra km Rs 3, extra hour Rs 4)")
+
+# --- Phone only, and only the caller's number ---
+call_summary.clear_limits()  # the checks above used up 919000000001's 5 for today
+before = len(perfox_requests)
+for channel in ("whatsapp", "web", "sms", "email"):
+    result, text = summary(CHAUFFEUR, channel=channel)
+    check(f"{channel}: not_available", result["outcome"] == "not_available", text)
+result, text = summary(CHAUFFEUR, phone=None)
+check("phone without a caller number: not_available", result["outcome"] == "not_available", text)
+check("...and nothing was sent", len(perfox_requests) == before)
+
+result, text = summary({**CHAUFFEUR, "to": "+919999999999", "mobile_number": "9999999999", "phone": "9999999999"})
+check("a number the AI passes is ignored: sent to the caller's number",
+      result["outcome"] == "sent" and perfox_requests[-1]["body"]["to"] == "+919000000001", perfox_requests[-1])
+result, text = summary(CHAUFFEUR, phone="+91 90000 00001")
+check("caller number in any format -> E.164 with '+'", perfox_requests[-1]["body"]["to"] == "+919000000001")
+
+# --- Own bookings only, allocated chauffeur, nothing missing ---
+before = len(perfox_requests)
+result, text = summary({"topic": "chauffeur", "booking_ref": "DCC100202"})  # 919000000002's booking
+check("someone else's booking -> not_available, reveals nothing",
+      result["outcome"] == "not_available" and contains_none(text, ["Irfan", "KA51EF9012", "Hosur"]), text)
+result, text = summary({"topic": "chauffeur", "booking_ref": "DCC100401"}, phone="919000000004")
+check("chauffeur not assigned -> not_allocated", result["outcome"] == "not_allocated", text)
+result, text = summary({"topic": "chauffeur"})
+check("no booking_ref -> incomplete", result["outcome"] == "incomplete", text)
+result, text = summary({"topic": "fare", "car_category": "Midsize", "trip_type": "Local"})
+check("fare without a city -> incomplete", result["outcome"] == "incomplete", text)
+result, text = summary({"topic": "fare", "car_category": "Midsize", "trip_type": "Local", "city": "Atlantis"})
+check("fare with no rate -> incomplete", result["outcome"] == "incomplete", text)
+result, text = summary({"topic": "weather"})
+check("unknown topic -> not_available", result["outcome"] == "not_available", text)
+config.WA_TEMPLATE_FARE_NAME = ""
+result, text = summary(FARE)
+check("no fare template -> not_available", result["outcome"] == "not_available", text)
+config.WA_TEMPLATE_FARE_NAME = "test_fare_summary"
+check("...and none of these sent anything", len(perfox_requests) == before)
+
+bare = {"booking_ref": "DCC9", "pickup_at": datetime.now(INDIA), "pickup_area": "Bengaluru", "status": "Despatched",
+        "driver_name": "RAMESH KUMAR", "driver_mobile": "9845012345", "car_model": "Toyota Innova Crysta",
+        "car_colour": "", "registration_number": "KA01AB1234"}
+check("chauffeur parameters: all five when complete", len(call_summary.chauffeur_parameters(bare) or []) == 5)
+for field in ("pickup_area", "car_model", "registration_number", "driver_name"):
+    check(f"chauffeur parameters: missing {field} -> None (send nothing)",
+          call_summary.chauffeur_parameters({**bare, field: ""}) is None)
+check("chauffeur parameters: missing date -> None", call_summary.chauffeur_parameters({**bare, "pickup_at": None}) is None)
+check("parameters are squashed to one line",
+      call_summary.chauffeur_parameters({**bare, "car_model": "Toyota\nInnova\t\tCrysta     X"})[3]
+      == "Toyota Innova Crysta X")
+check("single-line check",
+      [perfox.is_single_line(v) for v in ("ok value", "a\nb", "a\rb", "a\tb", "a    b", "a   b", "", "  ")]
+      == [True, False, False, False, False, True, False, False])
+try:
+    perfox.send_template("+919000000001", "t", "en_US", ["fine", "two\nlines"])
+    refused = None
+except OutboundFailed as failure:
+    refused = failure.reason
+check("a multi-line parameter is never sent", refused == "bad_parameter" and len(perfox_requests) == before, refused)
+
+# --- Limits ---
+call_summary.clear_limits()
+result, _ = summary(CHAUFFEUR, conversation_id="sum-limit")
+again, text = summary(CHAUFFEUR, conversation_id="sum-limit")
+check("limit: 2nd chauffeur summary in a conversation -> too_many_requests",
+      result["outcome"] == "sent" and again["outcome"] == "too_many_requests", text)
+result, text = summary(FARE, conversation_id="sum-limit")
+check("limit: the other topic still works in that conversation", result["outcome"] == "sent", text)
+outcomes = [summary(CHAUFFEUR)[0]["outcome"] for _ in range(4)]
+check("limit: 5 per number per day, then too_many_requests",
+      outcomes == ["sent", "sent", "sent", "too_many_requests"], outcomes)
+result, text = summary(FARE, phone="919000000002")
+check("limit: counted per number (another number still works)",
+      result["outcome"] == "sent" and perfox_requests[-1]["body"]["to"] == "+919000000002", text)
+
+# --- Failures: say sorry, offer to read it out, alert ---
+call_summary.clear_limits()
+failures = [
+    ("201 status failed", dict(body={"status": "failed", "send_authorized": True}), "provider_failed", "failed"),
+    ("201 status suppressed", dict(body={"status": "suppressed", "send_authorized": True}),
+     "provider_suppressed", "suppressed"),
+    ("201 sent but not authorised", dict(body={"status": "sent", "send_authorized": False}), "not_authorized", "sent"),
+    ("200 instead of 201", dict(status=200), "http_200", "http_200"),
+    ("400", dict(status=400, body={"error": "bad_request"}), "http_400", "http_400"),
+    ("404", dict(status=404, body={"error": "not_found"}), "http_404", "http_404"),
+    ("422 agent_not_published", dict(status=422, body={"error": "agent_not_published"}),
+     "agent_not_published", "http_422"),
+    ("422 no_trigger_for_channel", dict(status=422, body={"code": "no_trigger_for_channel"}),
+     "no_trigger_for_channel", "http_422"),
+    ("500 with non-JSON", dict(status=500, body="oops"), "http_500", "http_500"),
+]
+for label, reply, reason, provider_status in failures:
+    reply_with(**reply)
+    log_lines.clear()
+    result, text = summary(CHAUFFEUR, conversation_id="sum-fail")
+    alerts = [json.loads(l) for l in log_lines if '"alert_perfox_team"' in l]
+    check(f"{label} -> failed, alert '{reason}', provider status '{provider_status}'",
+          result["outcome"] == "failed" and alerts and alerts[0]["reason"] == reason
+          and summary_logs()[-1]["provider_status"] == provider_status, (text, alerts, summary_logs()))
+check("failed: apologises and offers to read the details out",
+      "sorry" in result["say"] and "couldn't send" in result["say"] and "read the details out" in result["say"])
+
+reply_with()
+result, text = summary(CHAUFFEUR, conversation_id="sum-fail")
+check("a failed summary doesn't use up the limit (retry sends)", result["outcome"] == "sent", text)
+
+saved_timeout = config.PERFOX_TIMEOUT_SECONDS
+config.PERFOX_TIMEOUT_SECONDS = 0.3
+reply_with(delay=1)
+log_lines.clear()
+result, text = summary(CHAUFFEUR)
+check("Perfox timeout -> failed with alert 'timeout'",
+      result["outcome"] == "failed" and '"reason": "timeout"' in "".join(log_lines), text)
+config.PERFOX_TIMEOUT_SECONDS = saved_timeout
+check("timeout is 5 seconds", config.PERFOX_TIMEOUT_SECONDS == 5)
+reply_with()
+
+config.PERFOX_API_KEY = ""
+result, text = summary(CHAUFFEUR)
+check("live without PERFOX_API_KEY -> failed (perfox_not_configured)",
+      result["outcome"] == "failed" and result["reason"] == "perfox_not_configured", text)
+config.PERFOX_API_KEY = PERFOX_TEST_KEY
+result, text = summary(CHAUFFEUR, phone="919000000005")
+check("DriveCarClub down -> failed", result["outcome"] == "failed", text)
+
+# --- No secrets or personal data in logs or results ---
+summary_lines = [l for l in all_log_lines if "send_call_summary" in l or "whatsapp_summary" in l]
+SUMMARY_SECRETS = ["9000000001", "9000000002", "9000000004", "9999999999"]  # full numbers, any format
+SUMMARY_VALUES = ["DCC100101", "Ramesh", "Innova", "KA01AB1234", "Bengaluru", "Gurugram", "2,400", "1,350",
+                  "6:30 PM", "Midsize"]
+check("summary log lines were checked", len(summary_lines) > 30, len(summary_lines))
+check("no log line of the whole run has the Perfox API key", not any(PERFOX_TEST_KEY in l for l in all_log_lines))
+check("no summary log line has a full number",
+      all(contains_none(l, SUMMARY_SECRETS) for l in summary_lines),
+      [l for l in summary_lines if not contains_none(l, SUMMARY_SECRETS)])
+check("no summary log line has a parameter value",
+      all(contains_none(l, SUMMARY_VALUES) for l in summary_lines),
+      [l for l in summary_lines if not contains_none(l, SUMMARY_VALUES)])
+all_sent_parameters = json.dumps([r["body"] for r in perfox_requests])
+check("sent parameters never have the customer, surname, mobile, address or VIP flag",
+      contains_none(all_sent_parameters, MOCK_PRIVATE + ["KUMAR", "Kumar", "9845012345", "vip"]),
+      all_sent_parameters)
+check("send_call_summary results have only outcome and say (no parameters echoed)",
+      set(summary(CHAUFFEUR, conversation_id="sum-echo")[0]) <= {"outcome", "say", "reason"})
+
+log_lines.clear()
+config.WA_SUMMARY_MODE = "smoke"
+log_startup_warnings()
+check("startup: unknown WA_SUMMARY_MODE warns", '"unknown_wa_summary_mode"' in "".join(log_lines))
+config.WA_SUMMARY_MODE, config.PERFOX_AGENT_ID = "live", ""
+log_lines.clear()
+log_startup_warnings()
+check("startup: live with a missing PERFOX_* setting warns", '"missing_perfox_settings"' in "".join(log_lines))
+check("startup warnings never have the API key", PERFOX_TEST_KEY not in "".join(log_lines))
+
+config.WA_SUMMARY_MODE, config.PERFOX_API_BASE, config.PERFOX_API_KEY = "mock", "", ""
+perfox_server.shutdown()
 
 # ----------------------------------------------------------------------
 # 12. No support number on the server (it lives in the Perfox knowledge base)
