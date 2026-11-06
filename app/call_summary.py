@@ -3,16 +3,30 @@
 Used by the send_call_summary tool (tools.py). The message itself is an
 approved WhatsApp template; we only fill in its body parameters, in order.
 
-  topic "chauffeur": booking ref; pickup ("05 Aug 2026, 6:30 PM, Bengaluru");
-                     chauffeur FIRST name; car model; registration number
-  topic "fare":      car category; trip type; city; one fare line, for example
-                     "8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)"
+Which value goes into {{1}}, {{2}}... is set in .env, so a changed template
+needs new settings, not code (comma-separated names from FIELDS below):
+  WA_CHAUFFEUR_PARAMS  default booking_ref,pickup_full,chauffeur_first_name,car_model,registration
+  WA_FARE_PARAMS       default car_category,trip_type,city,rates_line
+An unknown name stops the server at startup (server.py).
+
+  booking fields (topic "chauffeur"): customer_first_name, booking_ref,
+      pickup_date ("05 Aug 2026"), pickup_time ("6:30 PM"), pickup_area,
+      pickup_full ("05 Aug 2026, 6:30 PM, Bengaluru"), chauffeur_first_name,
+      driver_contact (only with WA_INCLUDE_DRIVER_PHONE=true), car_model,
+      registration
+  fare fields (topic "fare"): car_category, trip_type, city, rates_line
+      ("8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)"),
+      extra_charges_line ("extra km Rs 18, extra hour Rs 150")
+  A field the topic doesn't have (a fare field in a chauffeur summary, or
+  the other way round) is empty, so nothing is sent.
 
 Safety rules:
-  - Only the values above are ever used. Never the customer's name, the
-    chauffeur's surname or mobile, the address or the VIP flag.
-  - Every parameter is one line (no newlines, tabs or runs of spaces).
-  - If any value is missing, nothing is sent (the builders return None).
+  - Only the fields above are ever used: first names only, never a
+    surname, the address or the VIP flag.
+  - Every parameter is one line (no newlines, tabs or runs of spaces) and
+    at most MAX_PARAMETER_LENGTH characters.
+  - If any value is empty, nothing is sent (the builders return None).
+  - The values are never logged: only the count and the field names.
 
 Limits (in memory, a restart clears them): 1 summary per topic per
 conversation, and SUMMARY_MAX_PER_NUMBER_PER_DAY per number per day.
@@ -26,6 +40,22 @@ from app.mapper import INDIA
 
 TOPICS = ("chauffeur", "fare")
 
+# Every field name WA_CHAUFFEUR_PARAMS and WA_FARE_PARAMS may use.
+CHAUFFEUR_FIELDS = (
+    "customer_first_name", "booking_ref", "pickup_date", "pickup_time", "pickup_area", "pickup_full",
+    "chauffeur_first_name", "driver_contact", "car_model", "registration",
+)
+FARE_FIELDS = ("car_category", "trip_type", "city", "rates_line", "extra_charges_line")
+FIELDS = CHAUFFEUR_FIELDS + FARE_FIELDS
+
+# The original template layouts, used when a setting is empty.
+DEFAULT_FIELDS = {
+    "chauffeur": ("booking_ref", "pickup_full", "chauffeur_first_name", "car_model", "registration"),
+    "fare": ("car_category", "trip_type", "city", "rates_line"),
+}
+SETTINGS = {"chauffeur": "WA_CHAUFFEUR_PARAMS", "fare": "WA_FARE_PARAMS"}
+MAX_PARAMETER_LENGTH = 500
+
 
 def template_for(topic):
     """(template name, language) for a topic. An empty name = not set up."""
@@ -34,14 +64,35 @@ def template_for(topic):
     return config.WA_TEMPLATE_FARE_NAME, config.WA_TEMPLATE_FARE_LANG
 
 
+def fields_for(topic):
+    """The field names for a topic's template, in {{1}}, {{2}}... order."""
+    configured = config.WA_CHAUFFEUR_PARAMS if topic == "chauffeur" else config.WA_FARE_PARAMS
+    return [name.lower() for name in configured] or list(DEFAULT_FIELDS[topic])
+
+
+def unknown_fields():
+    """{"WA_FARE_PARAMS": ["bad_name"], ...}: every setting with a name not in FIELDS."""
+    unknown = {}
+    for topic, setting in SETTINGS.items():
+        bad = [name for name in fields_for(topic) if name not in FIELDS]
+        if bad:
+            unknown[setting] = bad
+    return unknown
+
+
 def one_line(value):
     """Squash all whitespace (newlines, tabs, repeated spaces) into single spaces."""
     return " ".join(str(value or "").split())
 
 
-def _all_or_nothing(values):
-    """The values as one-line text, or None if any of them is missing."""
-    cleaned = [one_line(value) for value in values]
+def clean(value):
+    """One line, at most MAX_PARAMETER_LENGTH characters."""
+    return one_line(one_line(value)[:MAX_PARAMETER_LENGTH])
+
+
+def build(fields, values):
+    """The cleaned values of "fields", in order, or None if any of them is empty."""
+    cleaned = [clean(values.get(name)) for name in fields]
     return cleaned if all(cleaned) else None
 
 
@@ -50,17 +101,30 @@ def _all_or_nothing(values):
 # ----------------------------------------------------------------------
 
 
-def chauffeur_parameters(booking):
-    """The 5 chauffeur parameters for one booking (internal format from mapper.py), or None."""
-    pickup = messages.pickup_time(booking)  # "05 Aug 2026, 6:30 PM", or ""
+def chauffeur_values(booking):
+    """Every booking field by name, for one booking (internal format from mapper.py)."""
+    pickup = booking["pickup_at"]
+    date = pickup.strftime("%d %b %Y") if pickup else ""
+    time = pickup.strftime("%I:%M %p").lstrip("0") if pickup else ""
     area = booking["pickup_area"]
-    return _all_or_nothing([
-        booking["booking_ref"],
-        f"{pickup}, {area}" if pickup and area else "",
-        mapper.first_name(booking["driver_name"]),  # first name only, never the surname
-        booking["car_model"],
-        booking["registration_number"],
-    ])
+    return {
+        "customer_first_name": mapper.first_name(booking.get("customer_name", "")),  # never the surname
+        "booking_ref": booking["booking_ref"],
+        "pickup_date": date,
+        "pickup_time": time,
+        "pickup_area": area,
+        "pickup_full": f"{date}, {time}, {area}" if date and area else "",
+        "chauffeur_first_name": mapper.first_name(booking["driver_name"]),  # never the surname
+        # Empty (so nothing is sent) unless WA_INCLUDE_DRIVER_PHONE=true.
+        "driver_contact": booking.get("driver_mobile", "") if config.WA_INCLUDE_DRIVER_PHONE else "",
+        "car_model": booking["car_model"],
+        "registration": booking["registration_number"],
+    }
+
+
+def chauffeur_parameters(booking):
+    """The chauffeur parameters in WA_CHAUFFEUR_PARAMS order, or None."""
+    return build(fields_for("chauffeur"), chauffeur_values(booking))
 
 
 def _package_extras(package):
@@ -90,11 +154,31 @@ def fare_line(packages):
     return "; ".join(f"{price} ({extra})" for price, extra in zip(prices, extras))
 
 
+def extra_charges_line(packages):
+    """The extras only: "extra km Rs 18, extra hour Rs 150" when every package
+    has the same, otherwise per package: "A: extra km Rs 1, ...; B: extra km Rs 3, ..."."""
+    extras = [_package_extras(p) for p in packages]
+    if len(set(extras)) == 1:
+        return extras[0]
+    return "; ".join(f"{p['package_name']}: {extra}" for p, extra in zip(packages, extras))
+
+
+def fare_values(car_category, trip_type, city, packages):
+    """Every fare field by name."""
+    return {
+        "car_category": car_category,
+        "trip_type": trip_type,
+        "city": city,
+        "rates_line": fare_line(packages),
+        "extra_charges_line": extra_charges_line(packages),
+    }
+
+
 def fare_parameters(car_category, trip_type, city, packages):
-    """The 4 fare parameters, or None."""
+    """The fare parameters in WA_FARE_PARAMS order, or None."""
     if not packages:
         return None
-    return _all_or_nothing([car_category, trip_type, city, fare_line(packages)])
+    return build(fields_for("fare"), fare_values(car_category, trip_type, city, packages))
 
 
 # ----------------------------------------------------------------------

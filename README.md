@@ -501,18 +501,49 @@ or `fare`; the rest are optional and depend on the topic.
   number the AI passes anyway is ignored.
 - **Topic `chauffeur`:** fetches the caller's bookings again (same filters as the booking tools),
   checks the `booking_ref` is theirs (any upper/lower case; otherwise `not_available`, revealing
-  nothing) and needs an allocated chauffeur (otherwise `not_allocated`). Parameters, in order:
-  booking ref; pickup as `05 Aug 2026, 6:30 PM, Bengaluru`; chauffeur **first name**; car model;
-  registration number.
+  nothing) and needs an allocated chauffeur (otherwise `not_allocated`).
 - **Topic `fare`:** runs the `get_fare` logic (same input checks and 1-hour cache) with
-  `car_category`, `trip_type` and `city`. Parameters, in order: car category; trip type; city;
-  one fare line such as `8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)`
-  (only API values; the outstation allowance and night stay are added when above 0).
-- **All or nothing.** If any value is missing (no booking ref, area, model, a fare input, no rate...),
-  nothing is sent and the outcome is `incomplete`.
-- **One line each.** Whitespace in a value is squashed to single spaces, and a parameter with a
-  newline, tab or 4+ spaces is never sent.
-- **Never sent:** the customer's name, the chauffeur's surname or mobile, the address, the VIP flag.
+  `car_category`, `trip_type` and `city`.
+- **Parameters are set in `.env`** (below), so a changed template needs only new Render
+  settings, not code.
+- **All or nothing.** If any value is empty (no booking ref, area, model, a fare input, no rate,
+  a field the topic doesn't have...), nothing is sent and the outcome is `incomplete`.
+- **One line each, at most 500 characters.** Newlines, tabs and runs of spaces in a value are
+  squashed to single spaces, and a parameter with a newline, tab or 4+ spaces is never sent.
+- **Never sent:** a surname, the address, the VIP flag. The customer's first name and the
+  chauffeur's mobile only if the layout asks for them (`driver_contact` also needs
+  `WA_INCLUDE_DRIVER_PHONE=true`).
+
+**Template parameters.** `WA_CHAUFFEUR_PARAMS` and `WA_FARE_PARAMS` are comma-separated field
+names, in the order the template's `{{1}}`, `{{2}}`... expect, for example
+`WA_FARE_PARAMS=car_category,trip_type,city,rates_line`. Empty = the original layout:
+
+| Topic | Default (empty setting) |
+|---|---|
+| `chauffeur` | `booking_ref,pickup_full,chauffeur_first_name,car_model,registration` |
+| `fare` | `car_category,trip_type,city,rates_line` |
+
+| Field | Topic | Value |
+|---|---|---|
+| `customer_first_name` | chauffeur | The booking's customer, first name only (`Priya`) |
+| `booking_ref` | chauffeur | `DCC100101` |
+| `pickup_date` | chauffeur | `05 Aug 2026` |
+| `pickup_time` | chauffeur | `6:30 PM` |
+| `pickup_area` | chauffeur | `Bengaluru` |
+| `pickup_full` | chauffeur | `05 Aug 2026, 6:30 PM, Bengaluru` |
+| `chauffeur_first_name` | chauffeur | `Ramesh` (never the surname) |
+| `driver_contact` | chauffeur | The chauffeur's mobile, **only if `WA_INCLUDE_DRIVER_PHONE=true`**; otherwise empty, so `incomplete` |
+| `car_model` | chauffeur | `Toyota Innova Crysta` |
+| `registration` | chauffeur | `KA01AB1234` |
+| `car_category` | fare | `Midsize` |
+| `trip_type` | fare | `Local - within city limits` |
+| `city` | fare | `Gurugram` |
+| `rates_line` | fare | `8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)` (only API values; the outstation allowance and night stay are added when given) |
+| `extra_charges_line` | fare | `extra km Rs 18, extra hour Rs 150` (per package, `A: ...; B: ...`, when they differ) |
+
+Names are matched in any upper/lower case. A field from the other topic is always empty, so that
+summary is always `incomplete` (a `wa_params_never_filled` warning at startup says so). **An
+unknown name stops the server at startup** with an error listing the allowed names.
 - Only `template` is sent, never `opening_message` (Perfox answers 400 to both).
 
 | Outcome | When |
@@ -529,9 +560,11 @@ number per day (India time). A summary that wasn't sent doesn't count. Set in
 [app/config.py](app/config.py) (`SUMMARY_MAX_PER_NUMBER_PER_DAY`, `PERFOX_TIMEOUT_SECONDS`).
 
 **Logging:** one `tool_call` line with the tool, topic, outcome, masked number, template name,
-parameter count and provider status (`mock`, `sent`, `failed`, `suppressed`, `http_422`...).
-Never the parameter values, the full number or the API key. In mock mode an extra
-`whatsapp_summary_mock` line has only the template name and the parameter count.
+parameter count, parameter field names in order (`parameter_fields`) and provider status
+(`mock`, `sent`, `failed`, `suppressed`, `http_422`...). Never the parameter values, the full
+number or the API key. In mock mode an extra `whatsapp_summary_mock` line has only the template
+name and the parameter count. At startup a `wa_summary_params` line per topic logs the count and
+field names.
 
 | Setting (`.env`) | What it does |
 |---|---|
@@ -541,6 +574,8 @@ Never the parameter values, the full number or the API key. In mock mode an extr
 | `PERFOX_AGENT_ID` | The published Perfox agent that sends the message |
 | `WA_TEMPLATE_CHAUFFEUR_NAME`, `WA_TEMPLATE_CHAUFFEUR_LANG` | The chauffeur template and its language (default `en_US`). Empty name = topic off. |
 | `WA_TEMPLATE_FARE_NAME`, `WA_TEMPLATE_FARE_LANG` | The fare template and its language (default `en_US`). Empty name = topic off (`not_available`). |
+| `WA_CHAUFFEUR_PARAMS`, `WA_FARE_PARAMS` | Field names for `{{1}}`, `{{2}}`..., comma-separated (above). Empty = the original layout. An unknown name stops the server. |
+| `WA_INCLUDE_DRIVER_PHONE` | `true` = `driver_contact` sends the chauffeur's mobile (a startup warning says so). Anything else = it stays empty. Default off. |
 
 With `live` and a `PERFOX_*` setting empty, the server logs a `missing_perfox_settings` warning
 at startup.
@@ -588,7 +623,8 @@ These are guesses in the code today. Each one is easy to change when the answer 
 | Production URLs, credentials and rate limits | UAT URLs | `DCC_TOKEN_URL`, `DCC_BOOKING_URL` in `.env` |
 | Share the chauffeur's mobile? (SOP 6 open item 2) | No | `SHARE_CHAUFFEUR_MOBILE` in `app/config.py` |
 | Approved SMS template and sender ID for the OTP | Text from the brief | `OTP_SMS_TEXT`, `PLIVO_SENDER_ID` in `.env` |
-| Approved WhatsApp templates for the call summary (names, languages, parameter order) | Chauffeur: 5 parameters, fare: 4 (section 6c) | `WA_TEMPLATE_*` in `.env`; the order in `app/call_summary.py` |
+| Approved WhatsApp templates for the call summary (names, languages, parameter order) | Chauffeur: 5 parameters, fare: 4 (section 6c) | `WA_TEMPLATE_*`, `WA_CHAUFFEUR_PARAMS`, `WA_FARE_PARAMS` in `.env` |
+| Chauffeur's mobile in the WhatsApp summary? | No | `WA_INCLUDE_DRIVER_PHONE` in `.env` |
 
 ## 9. Good to know
 

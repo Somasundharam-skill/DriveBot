@@ -930,7 +930,7 @@ def _summary_failed(reason):
 
 
 def _chauffeur_summary_parameters(mobile, booking_ref):
-    """(problem result, None), or (None, the 5 template parameters)."""
+    """(problem result, None), or (None, the template parameters)."""
     wanted = (booking_ref or "").strip().lower()
     if not wanted:
         return _summary_incomplete(), None
@@ -951,7 +951,7 @@ def _chauffeur_summary_parameters(mobile, booking_ref):
 
 
 def _fare_summary_parameters(arguments):
-    """(problem result, None), or (None, the 4 template parameters)."""
+    """(problem result, None), or (None, the template parameters)."""
     inputs = {
         "car_category": arguments.get("car_category"),
         "service_type": arguments.get("trip_type"),
@@ -977,8 +977,8 @@ def send_call_summary(caller, arguments, log_details):
     """Send the end-of-call WhatsApp summary to the caller's own number.
 
     Fills "log_details" as it goes (topic, mobile, template, parameter
-    count, provider status), so the log line has them even if sending
-    fails. Raises DCCUnavailable or OutboundFailed if something fails.
+    count and field names, provider status), so the log line has them even
+    if sending fails. Raises DCCUnavailable or OutboundFailed if something fails.
     """
     arguments = arguments or {}
     topic = str(arguments.get("topic") or "").strip().lower()
@@ -1011,14 +1011,17 @@ def send_call_summary(caller, arguments, log_details):
         )
     sent = False
     try:
-        # 4. Build the parameters (all or nothing), then send.
+        # 4. Build the parameters (all or nothing), then send. Only the
+        #    field names are logged, never the values.
+        fields = call_summary.fields_for(topic)
+        log_details["parameter_count"] = len(fields)
+        log_details["parameter_fields"] = fields
         if topic == "chauffeur":
             problem, parameters = _chauffeur_summary_parameters(mobile, arguments.get("booking_ref"))
         else:
             problem, parameters = _fare_summary_parameters(arguments)
         if problem:
             return problem
-        log_details["parameter_count"] = len(parameters)
         log_details["provider_status"] = perfox.send_template("+" + mobile, template_name, language, parameters)
         sent = True
         return _summary_result(
@@ -1061,6 +1064,7 @@ def _call_summary_tool(name, arguments, caller):
         mobile=log.mask_mobile(details.get("mobile") or identity.normalise_phone(caller.get("phone"))),
         template=details.get("template"),
         parameter_count=details.get("parameter_count"),
+        parameter_fields=details.get("parameter_fields"),  # the names in order, never the values
         provider_status=details.get("provider_status"),  # "mock", "sent", "suppressed", "http_422"...
         outcome=result["outcome"],
         reason=result.get("reason"),

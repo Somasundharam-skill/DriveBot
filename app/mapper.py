@@ -17,7 +17,9 @@ Our older guessed names are kept after the real ones as fallbacks.
 Safety rule: only the fields built in dispatch_summary() and
 chauffeur_details() ever leave this server. The customer's name, company,
 guest number, address, the chauffeur's surname and (for now) mobile are
-never shared. reportingAddress is never read at all.
+never shared. reportingAddress is never read at all. (The WhatsApp summary
+can be set up to send the customer's first name and the chauffeur's mobile:
+see call_summary.py.)
 """
 
 import re
@@ -50,6 +52,8 @@ FIELD_MAP = {
     # The real API has no colour field, so this is usually empty (and then left out).
     "car_colour": ["CarColour", "CarColor", "VehicleColour", "VehicleColor", "Colour", "Color"],
     "registration_number": ["carNumber", "CarNo", "VehicleNo", "VehicleNumber", "RegistrationNo", "RegNo"],
+    # Private: only its first name, and only in the WhatsApp summary (customer_first_name).
+    "customer_name": ["individualsname"],
 }
 
 # The response may be a plain list, or a dict holding the list under one of these keys.

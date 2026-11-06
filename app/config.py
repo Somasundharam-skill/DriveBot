@@ -140,6 +140,15 @@ WA_TEMPLATE_CHAUFFEUR_NAME = _text("WA_TEMPLATE_CHAUFFEUR_NAME")
 WA_TEMPLATE_CHAUFFEUR_LANG = _text("WA_TEMPLATE_CHAUFFEUR_LANG") or "en_US"
 WA_TEMPLATE_FARE_NAME = _text("WA_TEMPLATE_FARE_NAME")
 WA_TEMPLATE_FARE_LANG = _text("WA_TEMPLATE_FARE_LANG") or "en_US"
+# What goes into each template's {{1}}, {{2}}...: comma-separated field
+# names, in order, for example "car_category,trip_type,city,rates_line".
+# Empty = the original layout. The names are listed in call_summary.py; an
+# unknown name stops the server at startup (see server.py).
+WA_CHAUFFEUR_PARAMS = _list("WA_CHAUFFEUR_PARAMS")
+WA_FARE_PARAMS = _list("WA_FARE_PARAMS")
+# Allow the chauffeur's mobile as "driver_contact"? Only the word "true"
+# switches it on; otherwise driver_contact is empty and nothing is sent.
+WA_INCLUDE_DRIVER_PHONE = _text("WA_INCLUDE_DRIVER_PHONE").lower() == "true"
 
 # --- Verification on website chat --------------------------------------
 # "otp"  = the customer proves their number with a code (default).

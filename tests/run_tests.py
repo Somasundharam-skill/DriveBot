@@ -32,6 +32,9 @@ os.environ["WA_TEMPLATE_CHAUFFEUR_NAME"] = "test_chauffeur_summary"
 os.environ["WA_TEMPLATE_CHAUFFEUR_LANG"] = ""  # empty -> en_US
 os.environ["WA_TEMPLATE_FARE_NAME"] = "test_fare_summary"
 os.environ["WA_TEMPLATE_FARE_LANG"] = "en_GB"
+os.environ["WA_CHAUFFEUR_PARAMS"] = ""  # empty -> the original layouts; section 12a tries custom ones
+os.environ["WA_FARE_PARAMS"] = ""
+os.environ["WA_INCLUDE_DRIVER_PHONE"] = "false"
 
 import base64
 import json
@@ -1916,6 +1919,146 @@ check("sent parameters never have the customer, surname, mobile, address or VIP 
       all_sent_parameters)
 check("send_call_summary results have only outcome and say (no parameters echoed)",
       set(summary(CHAUFFEUR, conversation_id="sum-echo")[0]) <= {"outcome", "say", "reason"})
+
+# --- Configurable parameters: WA_CHAUFFEUR_PARAMS and WA_FARE_PARAMS ---
+# (After the check above: these layouts send the customer's first name and
+# the chauffeur's mobile on purpose.)
+check("default chauffeur layout when WA_CHAUFFEUR_PARAMS is empty",
+      config.WA_CHAUFFEUR_PARAMS == [] and call_summary.fields_for("chauffeur")
+      == ["booking_ref", "pickup_full", "chauffeur_first_name", "car_model", "registration"])
+check("default fare layout when WA_FARE_PARAMS is empty",
+      config.WA_FARE_PARAMS == [] and call_summary.fields_for("fare")
+      == ["car_category", "trip_type", "city", "rates_line"])
+check("default layouts are known names", call_summary.unknown_fields() == {})
+
+
+def sent_parameters():
+    return perfox_requests[-1]["body"]["template"]["body_parameters"]
+
+
+call_summary.clear_limits()
+log_lines.clear()
+config.WA_CHAUFFEUR_PARAMS = ["registration", "customer_first_name", "pickup_date", "pickup_time",
+                              "pickup_area", "chauffeur_first_name", "Booking_Ref"]  # any case
+result, text = summary(CHAUFFEUR)
+check("custom chauffeur order: sent in that order",
+      result["outcome"] == "sent" and sent_parameters()
+      == ["KA01AB1234", "Priya", TODAY_TEXT, "6:30 PM", "Bengaluru", "Ramesh", "DCC100101"], sent_parameters())
+line = summary_logs()[-1]
+check("custom chauffeur order: log has the count and the field names in order",
+      line["parameter_count"] == 7 and line["parameter_fields"]
+      == ["registration", "customer_first_name", "pickup_date", "pickup_time", "pickup_area",
+          "chauffeur_first_name", "booking_ref"], line)
+
+config.WA_FARE_PARAMS = ["rates_line", "City", "extra_charges_line", "car_category"]
+result, text = summary(FARE)
+check("custom fare order: sent in that order",
+      result["outcome"] == "sent" and sent_parameters()
+      == ["8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)", "Gurugram",
+          "extra km Rs 18, extra hour Rs 150", "Midsize"], sent_parameters())
+line = summary_logs()[-1]
+check("custom fare order: log has the count and the field names in order",
+      line["parameter_count"] == 4
+      and line["parameter_fields"] == ["rates_line", "city", "extra_charges_line", "car_category"], line)
+check("extra charges line: different extras per package -> each package named",
+      call_summary.extra_charges_line([
+          {"package_name": "A", "rate_inr": 100, "extra_km_rate_inr": 1, "extra_hour_rate_inr": 2},
+          {"package_name": "B", "rate_inr": 200, "extra_km_rate_inr": 3, "extra_hour_rate_inr": 4},
+      ]) == "A: extra km Rs 1, extra hour Rs 2; B: extra km Rs 3, extra hour Rs 4")
+
+# An empty value -> "incomplete" and nothing is sent.
+before = len(perfox_requests)
+config.WA_CHAUFFEUR_PARAMS = ["booking_ref", "driver_contact"]
+result, text = summary(CHAUFFEUR)
+check("driver_contact without WA_INCLUDE_DRIVER_PHONE -> incomplete",
+      result["outcome"] == "incomplete" and len(perfox_requests) == before, text)
+line = summary_logs()[-1]
+check("incomplete: log still has the count and field names",
+      line["parameter_count"] == 2 and line["parameter_fields"] == ["booking_ref", "driver_contact"], line)
+config.WA_FARE_PARAMS = ["car_category", "booking_ref"]  # a booking field in a fare summary
+result, text = summary(FARE)
+check("a field the topic doesn't have -> incomplete",
+      result["outcome"] == "incomplete" and len(perfox_requests) == before, text)
+config.WA_CHAUFFEUR_PARAMS = ["booking_ref", "customer_first_name"]
+no_customer = {**bare, "customer_name": ""}
+check("empty customer name -> None (send nothing)", call_summary.chauffeur_parameters(no_customer) is None)
+check("missing customer_name key -> None", call_summary.chauffeur_parameters(bare) is None)
+check("build: any empty value -> None",
+      call_summary.build(["a", "b"], {"a": "x", "b": "  \n "}) is None
+      and call_summary.build(["a", "b"], {"a": "x"}) is None)
+
+config.WA_INCLUDE_DRIVER_PHONE = True
+config.WA_CHAUFFEUR_PARAMS = ["chauffeur_first_name", "driver_contact"]
+result, text = summary(CHAUFFEUR)
+check("driver_contact with WA_INCLUDE_DRIVER_PHONE=true -> sent",
+      result["outcome"] == "sent" and sent_parameters() == ["Ramesh", "9845012345"], sent_parameters())
+config.WA_INCLUDE_DRIVER_PHONE = False
+
+# Sanitising: one line, at most 500 characters.
+check("clean: newlines, tabs and runs of spaces squashed",
+      call_summary.clean("Toyota\nInnova\r\n\tCrysta     X ") == "Toyota Innova Crysta X")
+long_value = call_summary.clean("A" * 499 + "     B" + "C" * 600)
+check("clean: capped at 500 characters, no trailing space",
+      len(long_value) <= 500 and long_value == "A" * 499 and perfox.is_single_line(long_value), len(long_value))
+check("clean: exactly 500 kept", call_summary.clean("x" * 600) == "x" * 500)
+config.WA_CHAUFFEUR_PARAMS = ["car_model", "registration"]
+parameters = call_summary.chauffeur_parameters({**bare, "car_model": "Toyota\tInnova\n" + "Z" * 700})
+check("chauffeur parameters are sanitised and capped",
+      parameters and len(parameters[0]) == 500 and parameters[0].startswith("Toyota Innova Z")
+      and all(perfox.is_single_line(p) for p in parameters), parameters)
+
+# The values are never logged: not the customer's or chauffeur's details.
+config.WA_CHAUFFEUR_PARAMS = list(call_summary.CHAUFFEUR_FIELDS)
+config.WA_INCLUDE_DRIVER_PHONE = True
+log_lines.clear()
+result, text = summary(CHAUFFEUR)
+check("every chauffeur field at once -> sent", result["outcome"] == "sent" and len(sent_parameters()) == 10,
+      sent_parameters())
+config.WA_FARE_PARAMS = list(call_summary.FARE_FIELDS)
+result, text = summary(FARE)
+check("every fare field at once -> sent", result["outcome"] == "sent" and len(sent_parameters()) == 5)
+sent_values = [v for r in perfox_requests[-2:] for v in r["body"]["template"]["body_parameters"]]
+check("no log line has a sent parameter value",
+      all(contains_none(l, sent_values + ["Priya", "9845012345"]) for l in log_lines),
+      [l for l in log_lines if not contains_none(l, sent_values)])
+check("...but the field names are logged",
+      [l["parameter_fields"] for l in summary_logs()[-2:]]
+      == [list(call_summary.CHAUFFEUR_FIELDS), list(call_summary.FARE_FIELDS)])
+config.WA_INCLUDE_DRIVER_PHONE = False
+
+# Startup: the layouts are logged (names only), with warnings for a layout
+# that can never be filled.
+config.WA_CHAUFFEUR_PARAMS = ["booking_ref", "driver_contact", "city"]
+config.WA_FARE_PARAMS = ["car_category", "rates_line"]
+log_lines.clear()
+log_startup_warnings()
+startup = [json.loads(l) for l in log_lines]
+check("startup: logs each layout's count and field names",
+      [(l["topic"], l["parameter_count"], l["parameter_fields"]) for l in startup if l["event"] == "wa_summary_params"]
+      == [("chauffeur", 3, ["booking_ref", "driver_contact", "city"]), ("fare", 2, ["car_category", "rates_line"])],
+      startup)
+check("startup: a field the topic doesn't have warns",
+      any(l["event"] == "wa_params_never_filled" and l["fields"] == ["city"] for l in startup), startup)
+check("startup: driver_contact without WA_INCLUDE_DRIVER_PHONE warns",
+      any(l["event"] == "wa_driver_phone_off" for l in startup), startup)
+config.WA_CHAUFFEUR_PARAMS = ["booking_ref", "colour", "car_model"]
+check("unknown_fields lists the unknown names per setting",
+      call_summary.unknown_fields() == {"WA_CHAUFFEUR_PARAMS": ["colour"]}, call_summary.unknown_fields())
+config.WA_CHAUFFEUR_PARAMS, config.WA_FARE_PARAMS = [], []
+
+# An unknown field name stops the server (in a fresh Python: settings are read once at import).
+started = start_server(WA_FARE_PARAMS="car_category, trip_type, colour, city")
+check("unknown field name in WA_FARE_PARAMS -> the server refuses to start",
+      started.returncode != 0 and "Refusing to start" in started.stderr and "WA_FARE_PARAMS" in started.stderr
+      and "colour" in started.stderr, started.stdout + started.stderr)
+check("...and the error lists every allowed name",
+      all(name in started.stderr for name in call_summary.FIELDS), started.stderr)
+started = start_server(WA_CHAUFFEUR_PARAMS="booking_ref,driver_phone")
+check("unknown field name in WA_CHAUFFEUR_PARAMS -> the server refuses to start",
+      started.returncode != 0 and "WA_CHAUFFEUR_PARAMS" in started.stderr and "driver_phone" in started.stderr,
+      started.stdout + started.stderr)
+started = start_server(WA_CHAUFFEUR_PARAMS="registration,booking_ref", WA_FARE_PARAMS="city,rates_line")
+check("known custom field names -> starts", started.returncode == 0, started.stdout + started.stderr)
 
 log_lines.clear()
 config.WA_SUMMARY_MODE = "smoke"

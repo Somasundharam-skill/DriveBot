@@ -19,7 +19,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
-from app import config, log, mock, tools, website
+from app import call_summary, config, log, mock, tools, website
 
 SERVER_INFO = {"name": "drivebot-mcp", "version": "0.1.0"}
 DEFAULT_PROTOCOL_VERSION = "2024-11-05"
@@ -253,6 +253,21 @@ def check_mock_number_lock():
         raise SystemExit(f"Refusing to start: {message}")
 
 
+def check_wa_params():
+    """WA_CHAUFFEUR_PARAMS and WA_FARE_PARAMS may only use known field names.
+
+    A typo would otherwise fail every summary at call time, so the server
+    refuses to start and lists the allowed names.
+    """
+    unknown = call_summary.unknown_fields()
+    if unknown:
+        problems = "; ".join(f"{setting} has unknown field name(s): {', '.join(names)}"
+                             for setting, names in unknown.items())
+        message = f"{problems}. Allowed names: {', '.join(call_summary.FIELDS)}."
+        log.error("wa_params_invalid", note=message)
+        raise SystemExit(f"Refusing to start: {message}")
+
+
 def log_startup_warnings():
     if config.VERIFICATION_MODE == "none":
         log.warning("verification_off",
@@ -296,6 +311,23 @@ def log_startup_warnings():
     elif config.WA_SUMMARY_MODE != "mock":
         log.warning("unknown_wa_summary_mode",
                     note=f"WA_SUMMARY_MODE={config.WA_SUMMARY_MODE!r} is not mock or live; using mock.")
+    # The template layouts: field names only.
+    topic_fields = {"chauffeur": call_summary.CHAUFFEUR_FIELDS, "fare": call_summary.FARE_FIELDS}
+    for topic, own_fields in topic_fields.items():
+        fields = call_summary.fields_for(topic)
+        log.info("wa_summary_params", topic=topic, parameter_count=len(fields), parameter_fields=fields)
+        never_filled = [name for name in fields if name not in own_fields]
+        if never_filled:
+            log.warning("wa_params_never_filled", topic=topic, fields=never_filled,
+                        note=f"{call_summary.SETTINGS[topic]} uses {', '.join(never_filled)}, which a {topic} "
+                             "summary doesn't have: every one will be 'incomplete'.")
+    if "driver_contact" in call_summary.fields_for("chauffeur"):
+        if config.WA_INCLUDE_DRIVER_PHONE:
+            log.warning("wa_driver_phone_on", note="WA_INCLUDE_DRIVER_PHONE=true: the chauffeur's mobile "
+                                                   "is sent in the WhatsApp summary.")
+        else:
+            log.warning("wa_driver_phone_off", note="WA_CHAUFFEUR_PARAMS uses driver_contact but "
+                        "WA_INCLUDE_DRIVER_PHONE is not true: every chauffeur summary will be 'incomplete'.")
     if config.OTP_MODE == "plivo":
         if not (config.PLIVO_AUTH_ID and config.PLIVO_AUTH_TOKEN and config.PLIVO_SENDER_ID):
             log.warning("missing_plivo_settings", note="OTP_MODE=plivo but a PLIVO_* setting is empty: no code can be sent.")
@@ -308,6 +340,7 @@ def log_startup_warnings():
 check_verification_lock()  # stops here if VERIFICATION_MODE=none outside UAT
 check_whatsapp_number_lock()  # (in practice already caught by the lock above)
 check_mock_number_lock()  # stops here if MOCK_NUMBER_SCENARIOS is set outside UAT
+check_wa_params()  # stops here if WA_CHAUFFEUR_PARAMS or WA_FARE_PARAMS has an unknown name
 log_startup_warnings()
 
 # Static files from web/ (index.html at "/"). Added LAST, so /mcp, /health,
