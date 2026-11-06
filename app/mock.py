@@ -22,6 +22,9 @@ Test numbers:
 
 Every booking has a fake customer name (individualsname, for example
 "ARJUN TEST"); 919000000002's most recent booking has a different one.
+Each booking's guest contact (b_Guest_Contact_No) is its own test number,
+in different formats ("9000000001", "+91 90000 00002"...), so the WhatsApp
+summary's customer_first_name matches it after normalising.
 
 Fares (get_fare): see _RATES below, for example Midsize / Local / Gurugram.
 
@@ -45,7 +48,7 @@ def _pickup_date(days_from_today):
 
 
 def _booking(booking_id, days_from_today, time_text, city, status, chauffeur="",
-             chauffeur_mobile="", car="", car_no="", guest_no="919000000099", customer="PRIYA TESTCUSTOMER"):
+             chauffeur_mobile="", car="", car_no="", guest_no="", customer="PRIYA TESTCUSTOMER"):
     """Build one raw booking the way DriveCarClub's DespatchedBooking API sends it."""
     return {
         "msg": None,
@@ -75,25 +78,31 @@ def _bookings_for(contact_no):
     if contact_no == "919000000001":
         return [
             _booking("DCC100101", 0, "18:30", "Bengaluru", "Despatched",
-                     "RAMESH KUMAR", "9845012345", "Toyota Innova Crysta", "KA01AB1234", customer="ARJUN TEST"),
+                     "RAMESH KUMAR", "9845012345", "Toyota Innova Crysta", "KA01AB1234",
+                     guest_no="9000000001", customer="ARJUN TEST"),
         ]
     if contact_no == "919000000002":
         return [
             _booking("DCC100201", -1, "09:00", "Mysuru", "Completed",
-                     "SURESH BABU", "9845011111", "Honda City", "KA05CD5678", customer="MEERA TEST"),
+                     "SURESH BABU", "9845011111", "Honda City", "KA05CD5678",
+                     guest_no="+91 90000 00002", customer="MEERA TEST"),
             _booking("DCC100203", 1, "08:15", "Whitefield", "Despatched",
-                     "ANIL SHARMA", "9845022222", "Toyota Etios", "KA03GH3456", customer="NIKHIL TEST"),
+                     "ANIL SHARMA", "9845022222", "Toyota Etios", "KA03GH3456",
+                     guest_no="09000000002", customer="NIKHIL TEST"),
             _booking("DCC100202", 0, "15:00", "Hosur", "Despatched",
-                     "MOHAMMED IRFAN KHAN", "9845033333", "Maruti Ciaz", "KA51EF9012", customer="MEERA TEST"),
+                     "MOHAMMED IRFAN KHAN", "9845033333", "Maruti Ciaz", "KA51EF9012",
+                     guest_no="919000000002", customer="MEERA TEST"),
         ]
     if contact_no == "919000000004":
         return [
-            _booking("DCC100401", 1, "10:00", "Jayanagar", "Confirmed", customer="KAVYA TEST"),
+            _booking("DCC100401", 1, "10:00", "Jayanagar", "Confirmed", guest_no="919000000004",
+                     customer="KAVYA TEST"),
         ]
     if contact_no == "919000000007":
         return [
             _booking("DCC100701", -3, "11:00", "Gurugram", "Completed",
-                     "VINOD RAO", "9845077777", "Honda City", "HR26AB7777", customer="NEHA TEST"),
+                     "VINOD RAO", "9845077777", "Honda City", "HR26AB7777",
+                     guest_no="+919000000007", customer="NEHA TEST"),
         ]
     return []  # 919000000003 and any other number: no bookings
 
@@ -220,5 +229,7 @@ class MockNumberScenarios:
             time.sleep(config.DCC_TIMEOUT_SECONDS)
             raise DCCUnavailable("timeout")
         data = SCENARIOS[scenario]() if scenario else []
+        for booking in data:
+            booking["b_Guest_Contact_No"] = contact_no  # the test number is set in .env, so filled in here
         response = {"status": "200", "message": "Success", "data": data}
         return mapper.unwrap_response_list(response)

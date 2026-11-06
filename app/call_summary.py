@@ -10,16 +10,19 @@ needs new settings, not code (comma-separated names from FIELDS below):
 An unknown name stops the server at startup (server.py).
 
   both topics: customer_first_name ("Sanjay": the first word of the booking's
-      "individualsname", or "there" if there is none). Chauffeur: from that
-      booking. Fare: from the caller's most recent booking of any date or
-      status (looked up by tools.py with the trusted caller number).
+      "individualsname"). Chauffeur: from that booking. Fare: from the
+      caller's most recent booking of any date or status (looked up by
+      tools.py with the trusted caller number). Only if the booking's guest
+      contact (b_Guest_Contact_No) IS the caller's number; otherwise, or with
+      no name or booking, "there". The log says which ("name_source").
   booking fields (topic "chauffeur"): booking_ref,
       pickup_date ("05 Aug 2026"), pickup_time ("6:30 PM"), pickup_area,
       pickup_full ("05 Aug 2026, 6:30 PM, Bengaluru"), chauffeur_first_name,
       driver_contact (only with WA_INCLUDE_DRIVER_PHONE=true), car_model,
       registration
   fare fields (topic "fare"): car_category, trip_type, city, rates_line
-      ("8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)"),
+      ("8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350", with " (extra km Rs 18,
+      extra hour Rs 150)" added only when the layout has no extra_charges_line),
       extra_charges_line ("extra km Rs 18, extra hour Rs 150", or "None")
   A field the topic doesn't have (a fare field in a chauffeur summary, or
   the other way round) is empty, so nothing is sent.
@@ -41,7 +44,7 @@ conversation, and SUMMARY_MAX_PER_NUMBER_PER_DAY per number per day.
 import threading
 from datetime import datetime
 
-from app import config, mapper, messages
+from app import config, identity, mapper, messages
 from app.mapper import INDIA
 
 TOPICS = ("chauffeur", "fare")
@@ -111,9 +114,27 @@ def build(fields, values):
 # ----------------------------------------------------------------------
 
 
-def customer_first_name(booking):
-    """"SANJAY MINHAS" -> "Sanjay"; "there" if the booking has no name (or there is no booking)."""
-    return mapper.first_name((booking or {}).get("customer_name", "")) or NO_NAME
+def is_callers_booking(booking, caller_mobile):
+    """True only if the booking's guest contact (b_Guest_Contact_No) is the
+    trusted caller number, both normalised ("9876543210" = "+91 98765 43210")."""
+    guest = identity.normalise_phone((booking or {}).get("guest_contact", ""))
+    return guest is not None and guest == identity.normalise_phone(caller_mobile)
+
+
+def customer_first_name(booking, caller_mobile):
+    """"SANJAY MINHAS" -> "Sanjay", but only for the caller's own booking
+    (is_callers_booking). "there" otherwise, or if there is no name or booking."""
+    if not is_callers_booking(booking, caller_mobile):
+        return NO_NAME
+    return mapper.first_name(booking.get("customer_name", "")) or NO_NAME
+
+
+def name_source(booking, caller_mobile, client_source):
+    """Where customer_first_name came from, for the log (never the name itself):
+    "mock" (mock data), "booking" (a real DriveCarClub booking) or "fallback" ("there")."""
+    if customer_first_name(booking, caller_mobile) == NO_NAME:
+        return "fallback"
+    return "mock" if client_source in ("mock", "mock_number") else "booking"
 
 
 def most_recent(bookings):
@@ -124,14 +145,14 @@ def most_recent(bookings):
                                         b["pickup_at"] or datetime.min.replace(tzinfo=INDIA)))
 
 
-def chauffeur_values(booking):
+def chauffeur_values(booking, caller_mobile=None):
     """Every booking field by name, for one booking (internal format from mapper.py)."""
     pickup = booking["pickup_at"]
     date = pickup.strftime("%d %b %Y") if pickup else ""
     time = pickup.strftime("%I:%M %p").lstrip("0") if pickup else ""
     area = booking["pickup_area"]
     return {
-        "customer_first_name": customer_first_name(booking),
+        "customer_first_name": customer_first_name(booking, caller_mobile),
         "booking_ref": booking["booking_ref"],
         "pickup_date": date,
         "pickup_time": time,
@@ -145,9 +166,9 @@ def chauffeur_values(booking):
     }
 
 
-def chauffeur_parameters(booking):
+def chauffeur_parameters(booking, caller_mobile=None):
     """The chauffeur parameters in WA_CHAUFFEUR_PARAMS order, or None."""
-    return build(fields_for("chauffeur"), chauffeur_values(booking))
+    return build(fields_for("chauffeur"), chauffeur_values(booking, caller_mobile))
 
 
 def _package_extras(package):
@@ -163,15 +184,19 @@ def _package_extras(package):
     return ", ".join(parts)
 
 
-def fare_line(packages):
+def fare_line(packages, with_extras=True):
     """All packages on one line, built only from the API values.
 
     When every package has the same extras, they are written once at the end:
       "8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)"
     Otherwise each package gets its own: "A Rs 1 (extra ...); B Rs 2 (extra ...)".
+    with_extras=False: the packages only, "8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350"
+    (for a layout that sends the extras in extra_charges_line).
     """
     extras = [_package_extras(p) for p in packages]
     prices = [f"{p['package_name']} {messages.rupees(p['rate_inr'])}" for p in packages]
+    if not with_extras:
+        return "; ".join(prices)
     if len(set(extras)) == 1:
         return "; ".join(prices) + f" ({extras[0]})"
     return "; ".join(f"{price} ({extra})" for price, extra in zip(prices, extras))
@@ -200,23 +225,27 @@ def extra_charges_line(packages):
     return "; ".join(f"{p['package_name']}: {extra}" for p, extra in zip(packages, extras))
 
 
-def fare_values(car_category, trip_type, city, packages, customer_booking=None):
-    """Every fare field by name. "customer_booking" is the caller's most recent booking (or None)."""
+def fare_values(car_category, trip_type, city, packages, customer_booking=None, caller_mobile=None,
+                fields=()):
+    """Every fare field by name. "customer_booking" is the caller's most recent booking (or None).
+    rates_line leaves out the bracketed extras when "fields" also has extra_charges_line."""
     return {
-        "customer_first_name": customer_first_name(customer_booking),
+        "customer_first_name": customer_first_name(customer_booking, caller_mobile),
         "car_category": car_category,
         "trip_type": trip_type,
         "city": city,
-        "rates_line": fare_line(packages),
+        "rates_line": fare_line(packages, with_extras="extra_charges_line" not in fields),
         "extra_charges_line": extra_charges_line(packages),
     }
 
 
-def fare_parameters(car_category, trip_type, city, packages, customer_booking=None):
+def fare_parameters(car_category, trip_type, city, packages, customer_booking=None, caller_mobile=None):
     """The fare parameters in WA_FARE_PARAMS order, or None."""
     if not packages:
         return None
-    return build(fields_for("fare"), fare_values(car_category, trip_type, city, packages, customer_booking))
+    fields = fields_for("fare")
+    return build(fields, fare_values(car_category, trip_type, city, packages, customer_booking, caller_mobile,
+                                     fields))
 
 
 # ----------------------------------------------------------------------

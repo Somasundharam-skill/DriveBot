@@ -1958,7 +1958,7 @@ config.WA_FARE_PARAMS = ["rates_line", "City", "extra_charges_line", "car_catego
 result, text = summary(FARE)
 check("custom fare order: sent in that order",
       result["outcome"] == "sent" and sent_parameters()
-      == ["8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)", "Gurugram",
+      == ["8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350", "Gurugram",  # extras only in extra_charges_line
           "extra km Rs 18, extra hour Rs 150", "Midsize"], sent_parameters())
 line = summary_logs()[-1]
 check("custom fare order: log has the count and the field names in order",
@@ -2062,11 +2062,30 @@ check("known custom field names -> starts", started.returncode == 0, started.std
 
 # --- customer_first_name: the caller's name, only in the template ---
 call_summary.clear_limits()
-check("customer_first_name: first word only, title case",
-      call_summary.customer_first_name({"customer_name": "SANJAY MINHAS"}) == "Sanjay")
+SANJAY = {"customer_name": "SANJAY MINHAS", "guest_contact": "98765 43210"}
+check("customer_first_name: first word only, title case (guest contact = caller)",
+      call_summary.customer_first_name(SANJAY, "919876543210") == "Sanjay")
+check("customer_first_name: numbers compared after normalising both",
+      all(call_summary.customer_first_name({**SANJAY, "guest_contact": guest}, caller) == "Sanjay"
+          for guest, caller in (("+91 98765 43210", "919876543210"), ("09876543210", "+91-98765-43210"),
+                                ("919876543210", "9876543210"), ("0091 9876543210", "09876543210"))))
+check("customer_first_name: another guest number -> 'there'",
+      call_summary.customer_first_name(SANJAY, "919000000001") == "there")
+check("customer_first_name: no or unreadable guest number, or no caller number -> 'there'",
+      call_summary.customer_first_name({**SANJAY, "guest_contact": ""}, "919876543210") == "there"
+      and call_summary.customer_first_name({**SANJAY, "guest_contact": "12345"}, "12345") == "there"
+      and call_summary.customer_first_name(SANJAY, None) == "there")
 check("customer_first_name: no name or no booking -> 'there'",
-      call_summary.customer_first_name({"customer_name": "  "}) == "there"
-      and call_summary.customer_first_name({}) == "there" and call_summary.customer_first_name(None) == "there")
+      call_summary.customer_first_name({**SANJAY, "customer_name": "  "}, "919876543210") == "there"
+      and call_summary.customer_first_name({}, "919876543210") == "there"
+      and call_summary.customer_first_name(None, "919876543210") == "there")
+check("name_source: mock data, a real booking, or the fallback",
+      [call_summary.name_source(SANJAY, "919876543210", "mock"),
+       call_summary.name_source(SANJAY, "919876543210", "mock_number"),
+       call_summary.name_source(SANJAY, "919876543210", "live"),
+       call_summary.name_source(SANJAY, "919000000001", "live"),
+       call_summary.name_source(None, "919876543210", "mock")]
+      == ["mock", "mock", "booking", "fallback", "fallback"])
 check("customer_first_name is allowed for both topics",
       "customer_first_name" in call_summary.TOPIC_FIELDS["chauffeur"]
       and "customer_first_name" in call_summary.TOPIC_FIELDS["fare"] and call_summary.FIELDS.count("customer_first_name") == 1)
@@ -2106,7 +2125,63 @@ config.WA_FARE_PARAMS = []
 summary(FARE)
 check("fare: bookings are not fetched when the template has no customer_first_name", booking_calls == [], booking_calls)
 del tools.booking_client_for("919000000001").get_bookings
+check("fare: no customer_first_name -> no name_source in the log", summary_logs()[-1]["name_source"] is None,
+      summary_logs()[-1])
+
+# The name only on a match: the same bookings, but with someone else's guest number.
+config.WA_CHAUFFEUR_PARAMS = ["customer_first_name", "booking_ref"]
+config.WA_FARE_PARAMS = ["customer_first_name", "city"]
+call_summary.clear_limits()  # 919000000001 used up its 5 for today above
+log_lines.clear()
+result, _ = summary(CHAUFFEUR)
+chauffeur_match = (result["outcome"], sent_parameters(), summary_logs()[-1]["name_source"])
+result, _ = summary(FARE)
+fare_match = (result["outcome"], sent_parameters(), summary_logs()[-1]["name_source"])
+check("match: chauffeur uses the name, name_source 'mock'",
+      chauffeur_match == ("sent", ["Arjun", "DCC100101"], "mock"), chauffeur_match)
+check("match: fare uses the name, name_source 'mock'", fare_match == ("sent", ["Arjun", "Gurugram"], "mock"),
+      fare_match)
+
+
+def someone_elses_guest_number(number):
+    return [{**raw, "b_Guest_Contact_No": "919000000099"} for raw in mock_get_bookings(number)]
+
+
+tools.booking_client_for("919000000001").get_bookings = someone_elses_guest_number
+result, _ = summary(CHAUFFEUR)
+chauffeur_mismatch = (result["outcome"], sent_parameters(), summary_logs()[-1]["name_source"])
+result, _ = summary(FARE)
+fare_mismatch = (result["outcome"], sent_parameters(), summary_logs()[-1]["name_source"])
+del tools.booking_client_for("919000000001").get_bookings
+check("mismatch: chauffeur says 'there', name_source 'fallback'",
+      chauffeur_mismatch == ("sent", ["there", "DCC100101"], "fallback"), chauffeur_mismatch)
+check("mismatch: fare says 'there', name_source 'fallback'",
+      fare_mismatch == ("sent", ["there", "Gurugram"], "fallback"), fare_mismatch)
+result, _ = summary(FARE, phone="919000000003")
+check("no booking: name_source 'fallback'", summary_logs()[-1]["name_source"] == "fallback", summary_logs()[-1])
+check("name_source is logged, the name never is",
+      all("name_source" in l for l in summary_logs()) and contains_none("".join(log_lines), CUSTOMER_NAMES),
+      log_lines)
 config.WA_CHAUFFEUR_PARAMS, config.WA_FARE_PARAMS = [], []
+
+# rates_line: the packages only when extra_charges_line carries the extras.
+gurugram = tools.get_fare({"car_category": "Midsize", "service_type": "Local", "city_name": "Gurugram"}, {})["packages"]
+config.WA_FARE_PARAMS = ["rates_line", "extra_charges_line"]
+check("rates_line with extra_charges_line: packages only, no bracketed extras",
+      call_summary.fare_parameters("Midsize", "Local", "Gurugram", gurugram)
+      == ["8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350", "extra km Rs 18, extra hour Rs 150"])
+config.WA_FARE_PARAMS = ["city", "rates_line"]
+check("rates_line without extra_charges_line: the old combined text",
+      call_summary.fare_parameters("Midsize", "Local", "Gurugram", gurugram)[1]
+      == "8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)")
+config.WA_FARE_PARAMS = []
+check("default fare layout keeps the old combined text", call_summary.fare_parameters(
+    "Midsize", "Local", "Gurugram", gurugram)[3] == FARE_PARAMETERS[3])
+check("fare_line: different extras per package, packages only -> no brackets",
+      call_summary.fare_line([
+          {"package_name": "A", "rate_inr": 100, "extra_km_rate_inr": 1, "extra_hour_rate_inr": 2},
+          {"package_name": "B", "rate_inr": 200, "extra_km_rate_inr": 3, "extra_hour_rate_inr": 4},
+      ], with_extras=False) == "A Rs 100; B Rs 200")
 
 # extra_charges_line: "None" instead of empty (an empty value stops the send).
 free = {"package_name": "A", "rate_inr": 100, "extra_km_rate_inr": 0, "extra_hour_rate_inr": 0}

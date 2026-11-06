@@ -929,7 +929,7 @@ def _summary_failed(reason):
     }
 
 
-def _chauffeur_summary_parameters(mobile, booking_ref):
+def _chauffeur_summary_parameters(mobile, booking_ref, log_details):
     """(problem result, None), or (None, the template parameters)."""
     wanted = (booking_ref or "").strip().lower()
     if not wanted:
@@ -944,7 +944,9 @@ def _chauffeur_summary_parameters(mobile, booking_ref):
             "not_allocated", "Your chauffeur hasn't been assigned yet, so there's no summary to "
             "send. You'll get the details once they are.",
         ), None
-    parameters = call_summary.chauffeur_parameters(booking)
+    if "customer_first_name" in call_summary.fields_for("chauffeur"):
+        log_details["name_source"] = call_summary.name_source(booking, mobile, booking_client_for(mobile).source)
+    parameters = call_summary.chauffeur_parameters(booking, mobile)
     if parameters is None:
         return _summary_incomplete(), None
     return None, parameters
@@ -965,7 +967,7 @@ def _latest_booking(mobile):
     return call_summary.most_recent(bookings)
 
 
-def _fare_summary_parameters(mobile, arguments):
+def _fare_summary_parameters(mobile, arguments, log_details):
     """(problem result, None), or (None, the template parameters)."""
     inputs = {
         "car_category": arguments.get("car_category"),
@@ -978,13 +980,18 @@ def _fare_summary_parameters(mobile, arguments):
         return _summary_incomplete(), None  # a missing input or no rate: never guess
     first = fare["packages"][0]
     # Look up the caller's bookings only if the template uses their name.
-    customer_booking = _latest_booking(mobile) if "customer_first_name" in call_summary.fields_for("fare") else None
+    customer_booking = None
+    if "customer_first_name" in call_summary.fields_for("fare"):
+        customer_booking = _latest_booking(mobile)
+        log_details["name_source"] = call_summary.name_source(
+            customer_booking, mobile, booking_client_for(mobile).source)
     parameters = call_summary.fare_parameters(
         first["car_category"] or inputs["car_category"],
         first["service_type"] or inputs["service_type"],
         first["city"] or inputs["city_name"],
         fare["packages"],
         customer_booking,
+        mobile,
     )
     if parameters is None:
         return _summary_incomplete(), None
@@ -1035,9 +1042,9 @@ def send_call_summary(caller, arguments, log_details):
         log_details["parameter_count"] = len(fields)
         log_details["parameter_fields"] = fields
         if topic == "chauffeur":
-            problem, parameters = _chauffeur_summary_parameters(mobile, arguments.get("booking_ref"))
+            problem, parameters = _chauffeur_summary_parameters(mobile, arguments.get("booking_ref"), log_details)
         else:
-            problem, parameters = _fare_summary_parameters(mobile, arguments)
+            problem, parameters = _fare_summary_parameters(mobile, arguments, log_details)
         if problem:
             return problem
         log_details["provider_status"] = perfox.send_template("+" + mobile, template_name, language, parameters)
@@ -1083,6 +1090,7 @@ def _call_summary_tool(name, arguments, caller):
         template=details.get("template"),
         parameter_count=details.get("parameter_count"),
         parameter_fields=details.get("parameter_fields"),  # the names in order, never the values
+        name_source=details.get("name_source"),  # "mock", "booking" or "fallback": never the name
         provider_status=details.get("provider_status"),  # "mock", "sent", "suppressed", "http_422"...
         outcome=result["outcome"],
         reason=result.get("reason"),

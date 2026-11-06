@@ -54,6 +54,9 @@ FIELD_MAP = {
     "registration_number": ["carNumber", "CarNo", "VehicleNo", "VehicleNumber", "RegistrationNo", "RegNo"],
     # Private: only its first name, and only in the WhatsApp summary (customer_first_name).
     "customer_name": ["individualsname"],
+    # Private: never shared. Only compared with the caller's number, so the name
+    # above is used only for the caller's own booking.
+    "guest_contact": ["b_Guest_Contact_No"],
 }
 
 # The response may be a plain list, or a dict holding the list under one of these keys.

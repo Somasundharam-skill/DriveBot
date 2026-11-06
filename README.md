@@ -115,11 +115,12 @@ says `unavailable`). [app/mapper.py](app/mapper.py) reads these fields from each
 | Car colour | (none) | The API has no colour, so it is left out |
 | Chauffeur mobile | `chaufferMobile` (DriveCarClub's spelling) | Hidden while `SHARE_CHAUFFEUR_MOBILE = False` |
 
-Never read or shared: `company_Name`, `b_Guest_Contact_No`, `reportingAddress`,
-`standinginstructions`, `dsNo`. `individualsname` (the customer's name) is read but never
-shown or logged: only its first word, and only in the WhatsApp summary's template when it asks
-for `customer_first_name` (section 6c). Our older guessed field names are still accepted after
-the real ones.
+Never read or shared: `company_Name`, `reportingAddress`, `standinginstructions`, `dsNo`.
+`individualsname` (the customer's name) and `b_Guest_Contact_No` (the guest's number) are read
+but never shown or logged. They are used only by the WhatsApp summary when the template asks for
+`customer_first_name`. Then the name's first word is used only if the guest number is the
+caller's number (section 6c). Our older guessed field names are still accepted after the real
+ones.
 
 | Setting (`.env`) | What it does |
 |---|---|
@@ -147,7 +148,10 @@ Dates are always worked out from today in India time.
 
 Every mock booking has a fake customer name (`individualsname`), for example `ARJUN TEST` for
 919000000001. For 919000000002 the most recent booking (tomorrow) is `NIKHIL TEST`, the others
-`MEERA TEST`; 919000000007 is `NEHA TEST`.
+`MEERA TEST`; 919000000007 is `NEHA TEST`. Each booking's guest number (`b_Guest_Contact_No`) is
+its own test number, written in different formats (`9000000001`, `+91 90000 00002`,
+`09000000002`...), so the names match after normalising. `MOCK_NUMBER_SCENARIOS` bookings get
+the configured test number as their guest number.
 
 ### 4a. Mock bookings for chosen numbers (`MOCK_NUMBER_SCENARIOS`, UAT testing only)
 
@@ -536,7 +540,7 @@ names, in the order the template's `{{1}}`, `{{2}}`... expect, for example
 
 | Field | Topic | Value |
 |---|---|---|
-| `customer_first_name` | both | First word of `individualsname`, title case (`SANJAY MINHAS` → `Sanjay`); `there` if there is no name. **Chauffeur:** from the booking already fetched. **Fare:** from the caller's most recent booking (latest pickup), looked up with the trusted caller number and **without** the date or status filters; `there` if they have no booking or DriveCarClub fails (the fare is still sent). The bookings are only fetched when the fare layout uses this field. |
+| `customer_first_name` | both | First word of `individualsname`, title case (`SANJAY MINHAS` → `Sanjay`), **only if the booking's guest number (`b_Guest_Contact_No`) is the trusted caller number** (both normalised, so `98765 43210` = `+919876543210`). Otherwise, or if there is no name, `there`. **Chauffeur:** from the booking already fetched. **Fare:** from the caller's most recent booking (latest pickup), looked up with the trusted caller number and **without** the date or status filters; `there` if they have no booking or DriveCarClub fails (the fare is still sent). The bookings are only fetched when the fare layout uses this field. |
 | `booking_ref` | chauffeur | `DCC100101` |
 | `pickup_date` | chauffeur | `05 Aug 2026` |
 | `pickup_time` | chauffeur | `6:30 PM` |
@@ -549,7 +553,7 @@ names, in the order the template's `{{1}}`, `{{2}}`... expect, for example
 | `car_category` | fare | `Midsize` |
 | `trip_type` | fare | `Local - within city limits` |
 | `city` | fare | `Gurugram` |
-| `rates_line` | fare | `8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)` (only API values; the outstation allowance and night stay are added when given) |
+| `rates_line` | fare | The packages joined by `; `: `8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350` when the layout also uses `extra_charges_line` (which carries the extras). Without it (as in the default layout), the old combined text: `8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)` (the outstation allowance and night stay are added when given). Only API values. |
 | `extra_charges_line` | fare | `extra km Rs 18, extra hour Rs 150` (per package, `A: ...; B: ...`, when they differ). Rs 0 extras are left out; `None` when there are no extra charges (an empty value would stop the send). |
 
 Names are matched in any upper/lower case. A field from the other topic is always empty, so that
@@ -570,9 +574,11 @@ number per day (India time). A summary that wasn't sent doesn't count. Set in
 [app/config.py](app/config.py) (`SUMMARY_MAX_PER_NUMBER_PER_DAY`, `PERFOX_TIMEOUT_SECONDS`).
 
 **Logging:** one `tool_call` line with the tool, topic, outcome, masked number, template name,
-parameter count, parameter field names in order (`parameter_fields`) and provider status
-(`mock`, `sent`, `failed`, `suppressed`, `http_422`...). Never the parameter values, the full
-number or the API key. In mock mode an extra `whatsapp_summary_mock` line has only the template
+parameter count, parameter field names in order (`parameter_fields`), `name_source` and provider
+status (`mock`, `sent`, `failed`, `suppressed`, `http_422`...). `name_source` says where
+`customer_first_name` came from: `mock` (mock data), `booking` (a real DriveCarClub booking) or
+`fallback` (`there`); it is empty when the layout doesn't use that field. Never the name, the
+other parameter values, the full number or the API key. In mock mode an extra `whatsapp_summary_mock` line has only the template
 name and the parameter count. At startup a `wa_summary_params` line per topic logs the count and
 field names.
 
