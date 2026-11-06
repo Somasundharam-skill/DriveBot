@@ -115,9 +115,11 @@ says `unavailable`). [app/mapper.py](app/mapper.py) reads these fields from each
 | Car colour | (none) | The API has no colour, so it is left out |
 | Chauffeur mobile | `chaufferMobile` (DriveCarClub's spelling) | Hidden while `SHARE_CHAUFFEUR_MOBILE = False` |
 
-Never read or shared: `individualsname`, `company_Name`, `b_Guest_Contact_No`,
-`reportingAddress`, `standinginstructions`, `dsNo`. Our older guessed field names are
-still accepted after the real ones.
+Never read or shared: `company_Name`, `b_Guest_Contact_No`, `reportingAddress`,
+`standinginstructions`, `dsNo`. `individualsname` (the customer's name) is read but never
+shown or logged: only its first word, and only in the WhatsApp summary's template when it asks
+for `customer_first_name` (section 6c). Our older guessed field names are still accepted after
+the real ones.
 
 | Setting (`.env`) | What it does |
 |---|---|
@@ -141,6 +143,11 @@ Dates are always worked out from today in India time.
 | 919000000004 | One booking tomorrow, chauffeur not assigned yet |
 | 919000000005 | DriveCarClub server error |
 | 919000000006 | DriveCarClub does not answer in time (timeout) |
+| 919000000007 | One booking 3 days ago, Completed (so the booking tools show none). Used to test the fare summary's `customer_first_name`, which looks at every booking |
+
+Every mock booking has a fake customer name (`individualsname`), for example `ARJUN TEST` for
+919000000001. For 919000000002 the most recent booking (tomorrow) is `NIKHIL TEST`, the others
+`MEERA TEST`; 919000000007 is `NEHA TEST`.
 
 ### 4a. Mock bookings for chosen numbers (`MOCK_NUMBER_SCENARIOS`, UAT testing only)
 
@@ -513,6 +520,10 @@ or `fare`; the rest are optional and depend on the topic.
 - **Never sent:** a surname, the address, the VIP flag. The customer's first name and the
   chauffeur's mobile only if the layout asks for them (`driver_contact` also needs
   `WA_INCLUDE_DRIVER_PHONE=true`).
+- **The customer's name stays on the server.** Only `send_call_summary` uses it, to fill the
+  template. It is never in a tool result, a `say` or `message` text, or a log line, so the AI
+  never sees it.
+- Only `template` is sent, never `opening_message` (Perfox answers 400 to both).
 
 **Template parameters.** `WA_CHAUFFEUR_PARAMS` and `WA_FARE_PARAMS` are comma-separated field
 names, in the order the template's `{{1}}`, `{{2}}`... expect, for example
@@ -525,7 +536,7 @@ names, in the order the template's `{{1}}`, `{{2}}`... expect, for example
 
 | Field | Topic | Value |
 |---|---|---|
-| `customer_first_name` | chauffeur | The booking's customer, first name only (`Priya`) |
+| `customer_first_name` | both | First word of `individualsname`, title case (`SANJAY MINHAS` → `Sanjay`); `there` if there is no name. **Chauffeur:** from the booking already fetched. **Fare:** from the caller's most recent booking (latest pickup), looked up with the trusted caller number and **without** the date or status filters; `there` if they have no booking or DriveCarClub fails (the fare is still sent). The bookings are only fetched when the fare layout uses this field. |
 | `booking_ref` | chauffeur | `DCC100101` |
 | `pickup_date` | chauffeur | `05 Aug 2026` |
 | `pickup_time` | chauffeur | `6:30 PM` |
@@ -539,12 +550,11 @@ names, in the order the template's `{{1}}`, `{{2}}`... expect, for example
 | `trip_type` | fare | `Local - within city limits` |
 | `city` | fare | `Gurugram` |
 | `rates_line` | fare | `8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)` (only API values; the outstation allowance and night stay are added when given) |
-| `extra_charges_line` | fare | `extra km Rs 18, extra hour Rs 150` (per package, `A: ...; B: ...`, when they differ) |
+| `extra_charges_line` | fare | `extra km Rs 18, extra hour Rs 150` (per package, `A: ...; B: ...`, when they differ). Rs 0 extras are left out; `None` when there are no extra charges (an empty value would stop the send). |
 
 Names are matched in any upper/lower case. A field from the other topic is always empty, so that
 summary is always `incomplete` (a `wa_params_never_filled` warning at startup says so). **An
 unknown name stops the server at startup** with an error listing the allowed names.
-- Only `template` is sent, never `opening_message` (Perfox answers 400 to both).
 
 | Outcome | When |
 |---|---|

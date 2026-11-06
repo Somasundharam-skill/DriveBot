@@ -312,8 +312,7 @@ def log_startup_warnings():
         log.warning("unknown_wa_summary_mode",
                     note=f"WA_SUMMARY_MODE={config.WA_SUMMARY_MODE!r} is not mock or live; using mock.")
     # The template layouts: field names only.
-    topic_fields = {"chauffeur": call_summary.CHAUFFEUR_FIELDS, "fare": call_summary.FARE_FIELDS}
-    for topic, own_fields in topic_fields.items():
+    for topic, own_fields in call_summary.TOPIC_FIELDS.items():
         fields = call_summary.fields_for(topic)
         log.info("wa_summary_params", topic=topic, parameter_count=len(fields), parameter_fields=fields)
         never_filled = [name for name in fields if name not in own_fields]

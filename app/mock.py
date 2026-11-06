@@ -17,6 +17,11 @@ Test numbers:
   919000000004  one booking tomorrow, chauffeur not allocated yet
   919000000005  server error
   919000000006  timeout
+  919000000007  one past, Completed booking only (hidden by the booking
+                tools; the fare summary's customer name still finds it)
+
+Every booking has a fake customer name (individualsname, for example
+"ARJUN TEST"); 919000000002's most recent booking has a different one.
 
 Fares (get_fare): see _RATES below, for example Midsize / Local / Gurugram.
 
@@ -40,14 +45,14 @@ def _pickup_date(days_from_today):
 
 
 def _booking(booking_id, days_from_today, time_text, city, status, chauffeur="",
-             chauffeur_mobile="", car="", car_no="", guest_no="919000000099"):
+             chauffeur_mobile="", car="", car_no="", guest_no="919000000099", customer="PRIYA TESTCUSTOMER"):
     """Build one raw booking the way DriveCarClub's DespatchedBooking API sends it."""
     return {
         "msg": None,
         "actual_bk_num": booking_id,
         "location": "Bangalore",
         "company_Name": "Mockco Industries Pvt Ltd",
-        "individualsname": "PRIYA TESTCUSTOMER",
+        "individualsname": customer,
         "b_Guest_Contact_No": guest_no,
         "reportingDate": _pickup_date(days_from_today),
         "reportingTime": time_text,
@@ -70,20 +75,25 @@ def _bookings_for(contact_no):
     if contact_no == "919000000001":
         return [
             _booking("DCC100101", 0, "18:30", "Bengaluru", "Despatched",
-                     "RAMESH KUMAR", "9845012345", "Toyota Innova Crysta", "KA01AB1234"),
+                     "RAMESH KUMAR", "9845012345", "Toyota Innova Crysta", "KA01AB1234", customer="ARJUN TEST"),
         ]
     if contact_no == "919000000002":
         return [
             _booking("DCC100201", -1, "09:00", "Mysuru", "Completed",
-                     "SURESH BABU", "9845011111", "Honda City", "KA05CD5678"),
+                     "SURESH BABU", "9845011111", "Honda City", "KA05CD5678", customer="MEERA TEST"),
             _booking("DCC100203", 1, "08:15", "Whitefield", "Despatched",
-                     "ANIL SHARMA", "9845022222", "Toyota Etios", "KA03GH3456"),
+                     "ANIL SHARMA", "9845022222", "Toyota Etios", "KA03GH3456", customer="NIKHIL TEST"),
             _booking("DCC100202", 0, "15:00", "Hosur", "Despatched",
-                     "MOHAMMED IRFAN KHAN", "9845033333", "Maruti Ciaz", "KA51EF9012"),
+                     "MOHAMMED IRFAN KHAN", "9845033333", "Maruti Ciaz", "KA51EF9012", customer="MEERA TEST"),
         ]
     if contact_no == "919000000004":
         return [
-            _booking("DCC100401", 1, "10:00", "Jayanagar", "Confirmed"),
+            _booking("DCC100401", 1, "10:00", "Jayanagar", "Confirmed", customer="KAVYA TEST"),
+        ]
+    if contact_no == "919000000007":
+        return [
+            _booking("DCC100701", -3, "11:00", "Gurugram", "Completed",
+                     "VINOD RAO", "9845077777", "Honda City", "HR26AB7777", customer="NEHA TEST"),
         ]
     return []  # 919000000003 and any other number: no bookings
 
@@ -155,16 +165,16 @@ class MockDriveCarClub:
 SCENARIOS = {
     "today": lambda: [
         _booking("MOCK-1001", 0, "18:30", "Bengaluru", "Despatched",
-                 "RAJESH TEST", "9000000000", "Swift Dzire", "KA00MK0001"),
+                 "RAJESH TEST", "9000000000", "Swift Dzire", "KA00MK0001", customer="ROHAN TEST"),
     ],
     "several": lambda: [
         _booking("MOCK-2001", 0, "11:00", "Indiranagar", "Despatched",
-                 "SUNIL TEST", "9000000000", "Toyota Innova Crysta", "KA00MK0002"),
+                 "SUNIL TEST", "9000000000", "Toyota Innova Crysta", "KA00MK0002", customer="TARUN TEST"),
         _booking("MOCK-2002", 1, "07:45", "Koramangala", "Despatched",
-                 "VIKRAM TEST", "9000000000", "Honda City", "KA00MK0003"),
+                 "VIKRAM TEST", "9000000000", "Honda City", "KA00MK0003", customer="TARUN TEST"),
     ],
     "not_allocated": lambda: [
-        _booking("MOCK-3001", 1, "09:30", "Jayanagar", "Despatched"),
+        _booking("MOCK-3001", 1, "09:30", "Jayanagar", "Despatched", customer="POOJA TEST"),
     ],
     "none": lambda: [],
     "down": None,  # DriveCarClub server error

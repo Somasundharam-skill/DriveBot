@@ -125,6 +125,10 @@ def contains_none(text, words):
 # Private fields in the mock data (customer name, company, guest number,
 # address, standing instructions). They must never appear in any result.
 MOCK_PRIVATE = ["PRIYA", "TESTCUSTOMER", "Mockco", "919000000099", "Prestige", "Flat 12B", "gate 3"]
+# The fake customer names (individualsname) in mock.py. Only the WhatsApp
+# summary's template parameters may ever have them.
+CUSTOMER_NAMES = ["ARJUN", "MEERA", "NIKHIL", "KAVYA", "NEHA", "ROHAN", "TARUN", "POOJA"]
+MOCK_PRIVATE += CUSTOMER_NAMES
 
 
 # ----------------------------------------------------------------------
@@ -1943,7 +1947,7 @@ config.WA_CHAUFFEUR_PARAMS = ["registration", "customer_first_name", "pickup_dat
 result, text = summary(CHAUFFEUR)
 check("custom chauffeur order: sent in that order",
       result["outcome"] == "sent" and sent_parameters()
-      == ["KA01AB1234", "Priya", TODAY_TEXT, "6:30 PM", "Bengaluru", "Ramesh", "DCC100101"], sent_parameters())
+      == ["KA01AB1234", "Arjun", TODAY_TEXT, "6:30 PM", "Bengaluru", "Ramesh", "DCC100101"], sent_parameters())
 line = summary_logs()[-1]
 check("custom chauffeur order: log has the count and the field names in order",
       line["parameter_count"] == 7 and line["parameter_fields"]
@@ -1979,10 +1983,6 @@ config.WA_FARE_PARAMS = ["car_category", "booking_ref"]  # a booking field in a 
 result, text = summary(FARE)
 check("a field the topic doesn't have -> incomplete",
       result["outcome"] == "incomplete" and len(perfox_requests) == before, text)
-config.WA_CHAUFFEUR_PARAMS = ["booking_ref", "customer_first_name"]
-no_customer = {**bare, "customer_name": ""}
-check("empty customer name -> None (send nothing)", call_summary.chauffeur_parameters(no_customer) is None)
-check("missing customer_name key -> None", call_summary.chauffeur_parameters(bare) is None)
 check("build: any empty value -> None",
       call_summary.build(["a", "b"], {"a": "x", "b": "  \n "}) is None
       and call_summary.build(["a", "b"], {"a": "x"}) is None)
@@ -2016,10 +2016,10 @@ check("every chauffeur field at once -> sent", result["outcome"] == "sent" and l
       sent_parameters())
 config.WA_FARE_PARAMS = list(call_summary.FARE_FIELDS)
 result, text = summary(FARE)
-check("every fare field at once -> sent", result["outcome"] == "sent" and len(sent_parameters()) == 5)
+check("every fare field at once -> sent", result["outcome"] == "sent" and len(sent_parameters()) == 6)
 sent_values = [v for r in perfox_requests[-2:] for v in r["body"]["template"]["body_parameters"]]
 check("no log line has a sent parameter value",
-      all(contains_none(l, sent_values + ["Priya", "9845012345"]) for l in log_lines),
+      all(contains_none(l, sent_values + ["Arjun", "9845012345"]) for l in log_lines),
       [l for l in log_lines if not contains_none(l, sent_values)])
 check("...but the field names are logged",
       [l["parameter_fields"] for l in summary_logs()[-2:]]
@@ -2060,6 +2060,76 @@ check("unknown field name in WA_CHAUFFEUR_PARAMS -> the server refuses to start"
 started = start_server(WA_CHAUFFEUR_PARAMS="registration,booking_ref", WA_FARE_PARAMS="city,rates_line")
 check("known custom field names -> starts", started.returncode == 0, started.stdout + started.stderr)
 
+# --- customer_first_name: the caller's name, only in the template ---
+call_summary.clear_limits()
+check("customer_first_name: first word only, title case",
+      call_summary.customer_first_name({"customer_name": "SANJAY MINHAS"}) == "Sanjay")
+check("customer_first_name: no name or no booking -> 'there'",
+      call_summary.customer_first_name({"customer_name": "  "}) == "there"
+      and call_summary.customer_first_name({}) == "there" and call_summary.customer_first_name(None) == "there")
+check("customer_first_name is allowed for both topics",
+      "customer_first_name" in call_summary.TOPIC_FIELDS["chauffeur"]
+      and "customer_first_name" in call_summary.TOPIC_FIELDS["fare"] and call_summary.FIELDS.count("customer_first_name") == 1)
+
+config.WA_CHAUFFEUR_PARAMS = ["customer_first_name", "booking_ref"]
+result, text = summary(CHAUFFEUR)
+check("chauffeur: name from the booking already fetched",
+      result["outcome"] == "sent" and sent_parameters() == ["Arjun", "DCC100101"], sent_parameters())
+check("chauffeur: booking without a name -> 'there'",
+      call_summary.chauffeur_parameters({**bare, "customer_name": ""}) == ["there", "DCC9"]
+      and call_summary.chauffeur_parameters(bare) == ["there", "DCC9"])
+
+config.WA_FARE_PARAMS = ["customer_first_name", "car_category", "city"]
+fare_names = {}
+for label, phone in (("one booking", "919000000001"), ("several bookings", "919000000002"),
+                     ("only a past, Completed booking", "919000000007"), ("no bookings", "919000000003"),
+                     ("DriveCarClub down", "919000000005")):
+    result, text = summary(FARE, phone=phone)
+    fare_names[label] = sent_parameters()[0] if result["outcome"] == "sent" else result["outcome"]
+check("fare: caller with a booking -> their first name", fare_names["one booking"] == "Arjun", fare_names)
+check("fare: several bookings -> the most recent one's name (tomorrow's)",
+      fare_names["several bookings"] == "Nikhil", fare_names)
+check("fare: no date or status filters (a past, Completed booking still counts)",
+      fare_names["only a past, Completed booking"] == "Neha"
+      and call("check_dispatch_status", phone="919000000007")[0]["outcome"] == "none", fare_names)
+check("fare: caller without a booking -> 'there'", fare_names["no bookings"] == "there", fare_names)
+check("fare: DriveCarClub down for the name lookup -> 'there' (the fare is still sent)",
+      fare_names["DriveCarClub down"] == "there", fare_names)
+check("fare: the name lookup uses the caller's number, never one the AI passes",
+      summary({**FARE, "mobile_number": "9000000002", "phone": "919000000002"}, phone="919000000001")[0]["outcome"]
+      == "sent" and sent_parameters()[0] == "Arjun", sent_parameters())
+
+booking_calls = []
+mock_get_bookings = tools.booking_client_for("919000000001").get_bookings
+tools.booking_client_for("919000000001").get_bookings = lambda number: booking_calls.append(1) or mock_get_bookings(number)
+config.WA_FARE_PARAMS = []
+summary(FARE)
+check("fare: bookings are not fetched when the template has no customer_first_name", booking_calls == [], booking_calls)
+del tools.booking_client_for("919000000001").get_bookings
+config.WA_CHAUFFEUR_PARAMS, config.WA_FARE_PARAMS = [], []
+
+# extra_charges_line: "None" instead of empty (an empty value stops the send).
+free = {"package_name": "A", "rate_inr": 100, "extra_km_rate_inr": 0, "extra_hour_rate_inr": 0}
+check("extra_charges_line: no extra charges -> 'None'", call_summary.extra_charges_line([free, free]) == "None")
+check("extra_charges_line: Rs 0 extras left out",
+      call_summary.extra_charges_line([{**free, "extra_km_rate_inr": 18}]) == "extra km Rs 18")
+check("extra_charges_line: one package with none -> 'None' for it",
+      call_summary.extra_charges_line([{**free, "extra_km_rate_inr": 18}, {**free, "package_name": "B"}])
+      == "A: extra km Rs 18; B: None")
+config.WA_FARE_PARAMS = ["city", "extra_charges_line"]
+check("extra_charges_line 'None' is sent, not 'incomplete'",
+      call_summary.fare_parameters("Midsize", "Local", "Gurugram", [free]) == ["Gurugram", "None"])
+config.WA_FARE_PARAMS = []
+
+# The name reached the template, and nowhere else: no tool result (so no
+# "say" or "message"), and no log line of the whole run.
+sent_names = json.dumps([r["body"]["template"]["body_parameters"] for r in perfox_requests])
+check("the customer names did reach the template parameters",
+      all(name.title() in sent_names for name in ("Arjun", "Nikhil", "Neha")), sent_names)
+check("no summary log line has a full caller number",
+      all(contains_none(l, ["9000000001", "9000000002", "9000000003", "9000000007"])
+          for l in all_log_lines if "send_call_summary" in l or "whatsapp_summary" in l))
+
 log_lines.clear()
 config.WA_SUMMARY_MODE = "smoke"
 log_startup_warnings()
@@ -2096,6 +2166,16 @@ check("support answers use the knowledge-base placeholder",
 check("no tool result has a support phone number", not any(has_support_number(t) for t in all_tool_texts))
 check("no log line has a support phone number", not any(has_support_number(line) for line in all_log_lines))
 check("no website reply has a support phone number", not any(has_support_number(t) for t in web_replies))
+
+# The customer's name (individualsname) only ever goes into the WhatsApp
+# template (section 12a): never a tool result, "say", "message" or log line.
+check("no tool result of the whole run has a customer name",
+      all(contains_none(t, CUSTOMER_NAMES) for t in all_tool_texts),
+      [t for t in all_tool_texts if not contains_none(t, CUSTOMER_NAMES)])
+check("no log line of the whole run has a customer name",
+      all(contains_none(l, CUSTOMER_NAMES) for l in all_log_lines),
+      [l for l in all_log_lines if not contains_none(l, CUSTOMER_NAMES)])
+check("no website reply has a customer name", all(contains_none(t, CUSTOMER_NAMES) for t in web_replies))
 
 # ----------------------------------------------------------------------
 print(f"\n{results['pass']} passed, {results['fail']} failed")

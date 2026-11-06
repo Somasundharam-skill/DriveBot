@@ -950,7 +950,22 @@ def _chauffeur_summary_parameters(mobile, booking_ref):
     return None, parameters
 
 
-def _fare_summary_parameters(arguments):
+def _latest_booking(mobile):
+    """The caller's most recent booking of ANY date or status (no filters), or None.
+
+    Only for customer_first_name in the fare summary: the booking (and the
+    name in it) never leaves this server and is never logged. If DriveCarClub
+    fails, None (the name becomes "there"): a fare summary doesn't need a booking.
+    """
+    try:
+        raw_bookings = booking_client_for(mobile).get_bookings(mobile) or []
+    except DCCUnavailable:
+        return None
+    bookings = [b for b in (mapper.clean_booking(raw) for raw in raw_bookings) if b]
+    return call_summary.most_recent(bookings)
+
+
+def _fare_summary_parameters(mobile, arguments):
     """(problem result, None), or (None, the template parameters)."""
     inputs = {
         "car_category": arguments.get("car_category"),
@@ -962,11 +977,14 @@ def _fare_summary_parameters(arguments):
     if fare["outcome"] != "found":
         return _summary_incomplete(), None  # a missing input or no rate: never guess
     first = fare["packages"][0]
+    # Look up the caller's bookings only if the template uses their name.
+    customer_booking = _latest_booking(mobile) if "customer_first_name" in call_summary.fields_for("fare") else None
     parameters = call_summary.fare_parameters(
         first["car_category"] or inputs["car_category"],
         first["service_type"] or inputs["service_type"],
         first["city"] or inputs["city_name"],
         fare["packages"],
+        customer_booking,
     )
     if parameters is None:
         return _summary_incomplete(), None
@@ -1019,7 +1037,7 @@ def send_call_summary(caller, arguments, log_details):
         if topic == "chauffeur":
             problem, parameters = _chauffeur_summary_parameters(mobile, arguments.get("booking_ref"))
         else:
-            problem, parameters = _fare_summary_parameters(arguments)
+            problem, parameters = _fare_summary_parameters(mobile, arguments)
         if problem:
             return problem
         log_details["provider_status"] = perfox.send_template("+" + mobile, template_name, language, parameters)

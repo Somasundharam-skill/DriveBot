@@ -9,20 +9,26 @@ needs new settings, not code (comma-separated names from FIELDS below):
   WA_FARE_PARAMS       default car_category,trip_type,city,rates_line
 An unknown name stops the server at startup (server.py).
 
-  booking fields (topic "chauffeur"): customer_first_name, booking_ref,
+  both topics: customer_first_name ("Sanjay": the first word of the booking's
+      "individualsname", or "there" if there is none). Chauffeur: from that
+      booking. Fare: from the caller's most recent booking of any date or
+      status (looked up by tools.py with the trusted caller number).
+  booking fields (topic "chauffeur"): booking_ref,
       pickup_date ("05 Aug 2026"), pickup_time ("6:30 PM"), pickup_area,
       pickup_full ("05 Aug 2026, 6:30 PM, Bengaluru"), chauffeur_first_name,
       driver_contact (only with WA_INCLUDE_DRIVER_PHONE=true), car_model,
       registration
   fare fields (topic "fare"): car_category, trip_type, city, rates_line
       ("8hrs 80kms Rs 2,400; 4hrs 40kms Rs 1,350 (extra km Rs 18, extra hour Rs 150)"),
-      extra_charges_line ("extra km Rs 18, extra hour Rs 150")
+      extra_charges_line ("extra km Rs 18, extra hour Rs 150", or "None")
   A field the topic doesn't have (a fare field in a chauffeur summary, or
   the other way round) is empty, so nothing is sent.
 
 Safety rules:
   - Only the fields above are ever used: first names only, never a
     surname, the address or the VIP flag.
+  - The customer's name is only ever used here, to fill the template: it
+    is never in a tool result, a "say" or "message" text, or a log line.
   - Every parameter is one line (no newlines, tabs or runs of spaces) and
     at most MAX_PARAMETER_LENGTH characters.
   - If any value is empty, nothing is sent (the builders return None).
@@ -45,8 +51,12 @@ CHAUFFEUR_FIELDS = (
     "customer_first_name", "booking_ref", "pickup_date", "pickup_time", "pickup_area", "pickup_full",
     "chauffeur_first_name", "driver_contact", "car_model", "registration",
 )
-FARE_FIELDS = ("car_category", "trip_type", "city", "rates_line", "extra_charges_line")
-FIELDS = CHAUFFEUR_FIELDS + FARE_FIELDS
+FARE_FIELDS = ("customer_first_name", "car_category", "trip_type", "city", "rates_line", "extra_charges_line")
+TOPIC_FIELDS = {"chauffeur": CHAUFFEUR_FIELDS, "fare": FARE_FIELDS}
+FIELDS = CHAUFFEUR_FIELDS + FARE_FIELDS[1:]
+
+# customer_first_name when the booking has no name, or the caller has no booking.
+NO_NAME = "there"
 
 # The original template layouts, used when a setting is empty.
 DEFAULT_FIELDS = {
@@ -101,6 +111,19 @@ def build(fields, values):
 # ----------------------------------------------------------------------
 
 
+def customer_first_name(booking):
+    """"SANJAY MINHAS" -> "Sanjay"; "there" if the booking has no name (or there is no booking)."""
+    return mapper.first_name((booking or {}).get("customer_name", "")) or NO_NAME
+
+
+def most_recent(bookings):
+    """The booking with the latest pickup (unreadable dates count as oldest), or None."""
+    if not bookings:
+        return None
+    return max(bookings, key=lambda b: (b["pickup_at"] is not None,
+                                        b["pickup_at"] or datetime.min.replace(tzinfo=INDIA)))
+
+
 def chauffeur_values(booking):
     """Every booking field by name, for one booking (internal format from mapper.py)."""
     pickup = booking["pickup_at"]
@@ -108,7 +131,7 @@ def chauffeur_values(booking):
     time = pickup.strftime("%I:%M %p").lstrip("0") if pickup else ""
     area = booking["pickup_area"]
     return {
-        "customer_first_name": mapper.first_name(booking.get("customer_name", "")),  # never the surname
+        "customer_first_name": customer_first_name(booking),
         "booking_ref": booking["booking_ref"],
         "pickup_date": date,
         "pickup_time": time,
@@ -154,18 +177,33 @@ def fare_line(packages):
     return "; ".join(f"{price} ({extra})" for price, extra in zip(prices, extras))
 
 
+def _charged_extras(package):
+    """Like _package_extras, but only the extras above Rs 0; "None" if there are none
+    (an empty value would stop the summary from being sent)."""
+    amounts = [
+        ("extra km", package.get("extra_km_rate_inr")),
+        ("extra hour", package.get("extra_hour_rate_inr")),
+        ("outstation allowance", package.get("outstation_allowance_inr")),
+        ("night stay", package.get("night_stay_inr")),
+    ]
+    parts = [f"{label} {messages.rupees(amount)}" for label, amount in amounts if amount]
+    return ", ".join(parts) or "None"
+
+
 def extra_charges_line(packages):
     """The extras only: "extra km Rs 18, extra hour Rs 150" when every package
-    has the same, otherwise per package: "A: extra km Rs 1, ...; B: extra km Rs 3, ..."."""
-    extras = [_package_extras(p) for p in packages]
+    has the same, otherwise per package: "A: extra km Rs 1, ...; B: None".
+    Rs 0 extras are left out; "None" when no package has any."""
+    extras = [_charged_extras(p) for p in packages]
     if len(set(extras)) == 1:
         return extras[0]
     return "; ".join(f"{p['package_name']}: {extra}" for p, extra in zip(packages, extras))
 
 
-def fare_values(car_category, trip_type, city, packages):
-    """Every fare field by name."""
+def fare_values(car_category, trip_type, city, packages, customer_booking=None):
+    """Every fare field by name. "customer_booking" is the caller's most recent booking (or None)."""
     return {
+        "customer_first_name": customer_first_name(customer_booking),
         "car_category": car_category,
         "trip_type": trip_type,
         "city": city,
@@ -174,11 +212,11 @@ def fare_values(car_category, trip_type, city, packages):
     }
 
 
-def fare_parameters(car_category, trip_type, city, packages):
+def fare_parameters(car_category, trip_type, city, packages, customer_booking=None):
     """The fare parameters in WA_FARE_PARAMS order, or None."""
     if not packages:
         return None
-    return build(fields_for("fare"), fare_values(car_category, trip_type, city, packages))
+    return build(fields_for("fare"), fare_values(car_category, trip_type, city, packages, customer_booking))
 
 
 # ----------------------------------------------------------------------
