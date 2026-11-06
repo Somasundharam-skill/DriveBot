@@ -167,6 +167,20 @@ Comma-separated `number=scenario` pairs. Numbers can be written in any Indian fo
 numbers DriveCarClub is **never called**, on every channel (phone, WhatsApp, website chat);
 all other numbers follow `DCC_MODE` as before. Empty (the default) switches it off.
 
+**Optional customer name.** Add `:Name` after the scenario to set the customer name on that
+number's mock bookings:
+
+```
+MOCK_NUMBER_SCENARIOS=919000000101=several:Somasundharam,919000000102=today:Friend
+```
+
+The name goes into the mock bookings' customer name (`individualsname`) and nowhere else, so
+it only shows up as `customer_first_name` in the WhatsApp summary (section 6c). It never
+appears in a tool result or a log line, including the startup warning and the refusal for a
+bad entry. With no name (or an empty one after the colon) the scenario's own mock name is kept
+(ROHAN TEST for `today`, TARUN TEST for `several`, POOJA TEST for `not_allocated`). A name
+can't contain a comma, because commas separate the entries.
+
 | Scenario | What happens |
 |---|---|
 | `today` | One booking today, chauffeur RAJESH TEST (shared as "Rajesh"), Swift Dzire, KA00MK0001 |

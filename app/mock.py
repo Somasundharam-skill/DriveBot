@@ -191,22 +191,33 @@ SCENARIOS = {
 }
 
 
-def mock_numbers():
-    """Read MOCK_NUMBER_SCENARIOS.
+def _read_entries():
+    """Read MOCK_NUMBER_SCENARIOS: "number=scenario" or "number=scenario:Name".
 
-    Returns ({normalised number: scenario}, positions of unreadable entries).
-    The positions (1, 2, ...) are what errors show: never the numbers.
+    Returns ({normalised number: (scenario, name or "")}, positions of unreadable entries).
+    The optional name is the customer name for that number's mock bookings.
     """
-    numbers, bad = {}, []
+    entries, bad = {}, []
     for position, entry in enumerate(config.MOCK_NUMBER_SCENARIOS, start=1):
-        raw_number, _, scenario = entry.partition("=")
+        raw_number, _, rest = entry.partition("=")
+        scenario, _, name = rest.partition(":")
         number = identity.normalise_phone(raw_number)
         scenario = scenario.strip().lower()
         if number is None or scenario not in SCENARIOS:
             bad.append(position)
         else:
-            numbers[number] = scenario
-    return numbers, bad
+            entries[number] = (scenario, " ".join(name.split()))
+    return entries, bad
+
+
+def mock_numbers():
+    """Read MOCK_NUMBER_SCENARIOS.
+
+    Returns ({normalised number: scenario}, positions of unreadable entries).
+    The positions (1, 2, ...) are what errors show: never the numbers or names.
+    """
+    entries, bad = _read_entries()
+    return {number: scenario for number, (scenario, _) in entries.items()}, bad
 
 
 def scenario_for(mobile):
@@ -214,6 +225,14 @@ def scenario_for(mobile):
     if not mobile or not config.MOCK_NUMBER_SCENARIOS:
         return None
     return mock_numbers()[0].get(mobile)
+
+
+def customer_name_for(mobile):
+    """The customer name given for "91XXXXXXXXXX" in MOCK_NUMBER_SCENARIOS, or "" (use the
+    scenario's own mock name). Only ever put into the mock bookings: never logged."""
+    if not mobile or not config.MOCK_NUMBER_SCENARIOS:
+        return ""
+    return _read_entries()[0].get(mobile, ("", ""))[1]
 
 
 class MockNumberScenarios:
@@ -229,7 +248,10 @@ class MockNumberScenarios:
             time.sleep(config.DCC_TIMEOUT_SECONDS)
             raise DCCUnavailable("timeout")
         data = SCENARIOS[scenario]() if scenario else []
+        name = customer_name_for(contact_no)
         for booking in data:
             booking["b_Guest_Contact_No"] = contact_no  # the test number is set in .env, so filled in here
+            if name:
+                booking["individualsname"] = name  # "number=scenario:Name"; else the mock name stays
         response = {"status": "200", "message": "Success", "data": data}
         return mapper.unwrap_response_list(response)

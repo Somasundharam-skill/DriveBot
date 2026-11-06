@@ -248,6 +248,7 @@ def check_mock_number_lock():
     _, bad = mock.mock_numbers()
     if bad:
         message = (f"MOCK_NUMBER_SCENARIOS entries {bad} (counting from 1) are not \"number=scenario\" "
+                   "(or \"number=scenario:Name\") "
                    f"with a valid mobile number and one of: {', '.join(mock.SCENARIOS)}.")
         log.error("mock_number_scenarios_invalid", note=message)
         raise SystemExit(f"Refusing to start: {message}")

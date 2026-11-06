@@ -127,7 +127,8 @@ def contains_none(text, words):
 MOCK_PRIVATE = ["PRIYA", "TESTCUSTOMER", "Mockco", "919000000099", "Prestige", "Flat 12B", "gate 3"]
 # The fake customer names (individualsname) in mock.py. Only the WhatsApp
 # summary's template parameters may ever have them.
-CUSTOMER_NAMES = ["ARJUN", "MEERA", "NIKHIL", "KAVYA", "NEHA", "ROHAN", "TARUN", "POOJA"]
+CUSTOMER_NAMES = ["ARJUN", "MEERA", "NIKHIL", "KAVYA", "NEHA", "ROHAN", "TARUN", "POOJA",
+                  "ZEPHYRINA", "QUILLON"]  # the last two: names given in MOCK_NUMBER_SCENARIOS
 MOCK_PRIVATE += CUSTOMER_NAMES
 
 
@@ -1498,6 +1499,47 @@ started = start_server(MOCK_NUMBER_SCENARIOS="", DCC_BOOKING_URL=PROD_URL)
 check("empty MOCK_NUMBER_SCENARIOS + non-UAT URL -> starts, no warning",
       started.returncode == 0 and "mock_numbers_on" not in started.stdout, started.stdout + started.stderr)
 
+# Optional customer name per number: "number=scenario:Name" (fake names only).
+config.MOCK_NUMBER_SCENARIOS = ["+91 90000 00101=today:  Zephyrina   Testname ", "09000000102=several",
+                                "919000000103=not_allocated:", "919000000104=None:Quillon"]
+check("names: mock_numbers still gives number -> scenario (the name is not part of it)",
+      tools.mock.mock_numbers() == ({"919000000101": "today", "919000000102": "several",
+                                     "919000000103": "not_allocated", "919000000104": "none"}, []),
+      tools.mock.mock_numbers())
+check("names: the name given, tidied; none or empty -> ''",
+      [tools.mock.customer_name_for(n) for n in ("919000000101", "919000000102", "919000000103", "919000000104",
+                                                  "919000000001", None)]
+      == ["Zephyrina Testname", "", "", "Quillon", "", ""])
+check("names: a name given -> the mock bookings' customer name",
+      [b["individualsname"] for b in tools._mock_numbers.get_bookings("919000000101")] == ["Zephyrina Testname"])
+check("names: no name given -> the scenario's own mock name",
+      [b["individualsname"] for b in tools._mock_numbers.get_bookings("919000000102")] == ["TARUN TEST", "TARUN TEST"]
+      and [b["individualsname"] for b in tools._mock_numbers.get_bookings("919000000103")] == ["POOJA TEST"])
+named, plain = tools._mock_numbers.get_bookings("919000000101")[0], tools.mock.SCENARIOS["today"]()[0]
+check("names: only the customer name changes",
+      {**named, "individualsname": ""} == {**plain, "individualsname": "", "b_Guest_Contact_No": "919000000101"})
+log_lines.clear()
+name_texts = [mock_call("today")[1], mock_call("today", "get_chauffeur_details", {"booking_ref": "MOCK-1001"})[1],
+              mock_call("today", channel="whatsapp")[1]]
+check("names: the booking tools still work", all('"outcome": "one"' in t or '"shared"' in t for t in name_texts),
+      name_texts)
+check("names: never in a tool result", all(contains_none(t, ["Zephyrina", "Testname", "Quillon"]) for t in name_texts),
+      name_texts)
+log_startup_warnings()
+check("names: never in a log line (tool calls and startup)",
+      log_lines and all(contains_none(l, ["Zephyrina", "Testname", "Quillon"]) for l in log_lines), log_lines)
+started = start_server(MOCK_NUMBER_SCENARIOS="919000000101=today:Zephyrina,919000000104=none:Quillon",
+                       DCC_BOOKING_URL=UAT_URL)
+check("names: the server starts, and its output has no name or number",
+      started.returncode == 0 and '"count": 2' in started.stdout
+      and contains_none(started.stdout + started.stderr, ["Zephyrina", "Quillon"])
+      and not has_mock_number(started.stdout + started.stderr), started.stdout + started.stderr)
+started = start_server(MOCK_NUMBER_SCENARIOS="919000000101=sunny:Zephyrina", DCC_BOOKING_URL=UAT_URL)
+check("names: a bad entry is refused without the name or number",
+      started.returncode != 0 and "number=scenario:Name" in started.stderr
+      and contains_none(started.stdout + started.stderr, ["Zephyrina"])
+      and not has_mock_number(started.stdout + started.stderr), started.stdout + started.stderr)
+
 config.MOCK_NUMBER_SCENARIOS = []
 before = dict(counts)
 result, text = call("check_dispatch_status", phone=MOCK_NUMBERS["today"])
@@ -2182,6 +2224,27 @@ check("fare_line: different extras per package, packages only -> no brackets",
           {"package_name": "A", "rate_inr": 100, "extra_km_rate_inr": 1, "extra_hour_rate_inr": 2},
           {"package_name": "B", "rate_inr": 200, "extra_km_rate_inr": 3, "extra_hour_rate_inr": 4},
       ], with_extras=False) == "A Rs 100; B Rs 200")
+
+# A MOCK_NUMBER_SCENARIOS name reaches the WhatsApp template, and only that.
+config.MOCK_NUMBER_SCENARIOS = ["919000000101=today:Zephyrina Testname", "919000000102=several"]
+config.WA_CHAUFFEUR_PARAMS = ["customer_first_name", "booking_ref"]
+config.WA_FARE_PARAMS = ["customer_first_name", "city"]
+call_summary.clear_limits()
+log_lines.clear()
+named, named_params = [], []
+for arguments in ({"topic": "chauffeur", "booking_ref": "MOCK-1001"}, FARE):
+    named.append(summary(arguments, phone="919000000101"))
+    named_params.append(sent_parameters() if named[-1][0]["outcome"] == "sent" else named[-1][0]["outcome"])
+check("scenario name given: used in the template (first name), name_source 'mock'",
+      named_params == [["Zephyrina", "MOCK-1001"], ["Zephyrina", "Gurugram"]]
+      and [l["name_source"] for l in summary_logs()[-2:]] == ["mock", "mock"], (named_params, summary_logs()))
+result, _ = summary({"topic": "chauffeur", "booking_ref": "MOCK-2001"}, phone="919000000102")
+check("scenario without a name: the mock name", result["outcome"] == "sent" and sent_parameters()
+      == ["Tarun", "MOCK-2001"], sent_parameters())
+check("scenario name: not in the tool results or the log lines",
+      all(contains_none(text, ["Zephyrina", "Testname"]) for _, text in named)
+      and all(contains_none(l, ["Zephyrina", "Testname"]) for l in log_lines), log_lines)
+config.MOCK_NUMBER_SCENARIOS, config.WA_CHAUFFEUR_PARAMS, config.WA_FARE_PARAMS = [], [], []
 
 # extra_charges_line: "None" instead of empty (an empty value stops the send).
 free = {"package_name": "A", "rate_inr": 100, "extra_km_rate_inr": 0, "extra_hour_rate_inr": 0}
