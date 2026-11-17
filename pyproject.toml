@@ -16,6 +16,11 @@ dependencies = [
 # This is an app we run, not a library we publish, so uv doesn't need to build it.
 package = false
 
+[tool.vercel]
+# Vercel's FastAPI preset: the FastAPI instance "app" in app/server.py. It
+# serves every path (/mcp, /health, /api/..., the web/ page). Ignored elsewhere.
+entrypoint = "app.server:app"
+
 [dependency-groups]
 # Only needed to run the tests (FastAPI's TestClient uses httpx2).
 dev = [

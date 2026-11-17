@@ -19,6 +19,7 @@ os.environ["VERIFICATION_MODE"] = "otp"  # the default; one section switches it 
 os.environ["WHATSAPP_NUMBER_MODE"] = "auto"  # the default; one section switches it to "ask"
 os.environ["DCC_BOOKING_URL"] = "https://drivecarclub.com/CarclubCRMUAT/Api/Home/DespatchedBooking"
 os.environ["KEEP_ALIVE_URL"] = ""  # never ping the real server from tests
+os.environ["VERCEL"] = ""  # a normal host; the Vercel section switches it on
 os.environ["ENABLE_DOCS"] = "false"
 os.environ["INCLUDE_PAST_BOOKINGS"] = "false"  # the default; one test switches it on
 os.environ["MOCK_NUMBER_SCENARIOS"] = ""  # the default; section 11a fills it with FAKE numbers
@@ -53,7 +54,7 @@ from app import browser_sessions, call_summary, config, fares, identity, message
 from app.drivecarclub import DriveCarClubClient
 from app.errors import DCCUnavailable, OutboundFailed, SMSUnavailable
 from app.mapper import INDIA
-from app.server import app, check_whatsapp_number_lock, log_startup_warnings
+from app.server import app, check_whatsapp_number_lock, keep_alive, log_startup_warnings
 
 # ----------------------------------------------------------------------
 # Tiny test helpers
@@ -1024,6 +1025,12 @@ class FakeDriveCarClub(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
 
+        if self.path == "/token-flaky":  # 503 on every odd call, a token on every even one
+            counts["flaky_token"] = counts.get("flaky_token", 0) + 1
+            if counts["flaky_token"] % 2:
+                return self.send(503, {"error": "warming up"})
+            return self.send(200, {"access_token": "tok-flaky"})
+
         if self.path in ("/token", "/token-text"):
             if self.headers.get("Authorization") != GOOD_BASIC:
                 return self.send(401, {"error": "bad credentials"})
@@ -1116,6 +1123,24 @@ check("wrong credentials on Token API is a failure",
 
 text_client = live_client(token_path="/token-text")
 check("plain-string token response is accepted", text_client.get_token().startswith("tok"))
+
+# Token API: its own timeout (DCC_TOKEN_TIMEOUT_SECONDS) and one retry after 1 second.
+check("token timeout: 10 seconds by default, only for the Token API",
+      config.DCC_TOKEN_TIMEOUT_SECONDS == 10 and DriveCarClubClient().token_timeout == 10
+      and DriveCarClubClient(token_timeout=3).token_timeout == 3 and DriveCarClubClient().timeout == 1)
+started_at = time.monotonic()
+log_lines.clear()
+flaky_token = live_client(token_path="/token-flaky").get_token()
+check("token: a 5xx is retried once after 1 second, then works",
+      flaky_token == "tok-flaky" and counts["flaky_token"] == 2 and time.monotonic() - started_at >= 1,
+      (flaky_token, counts))
+check("token retry is logged with the reason only", any('"dcc_token_retry"' in l and '"token_http_503"' in l
+                                                         for l in log_lines), log_lines)
+check("token: wrong credentials (4xx) are not retried",
+      not any('"dcc_token_retry"' in l and "token_http_401" in l for l in all_log_lines))
+check("token: unreachable is retried once, then fails (the test above)",
+      sum('"dcc_token_retry"' in l and ("token_network_error" in l or "token_timeout" in l)
+          for l in all_log_lines) == 1)
 
 # --- Plivo SMS sender against the same fake server ---
 PLIVO = {"auth_id": "MAFAKE", "auth_token": "secret-token", "sender_id": "DCCLUB", "base_url": base_url, "timeout": 2}
@@ -2304,6 +2329,56 @@ check("support answers use the knowledge-base placeholder",
 check("no tool result has a support phone number", not any(has_support_number(t) for t in all_tool_texts))
 check("no log line has a support phone number", not any(has_support_number(line) for line in all_log_lines))
 check("no website reply has a support phone number", not any(has_support_number(t) for t in web_replies))
+
+# ----------------------------------------------------------------------
+# 13. Vercel (VERCEL set): no background task, web/ optional, one warning
+# ----------------------------------------------------------------------
+print("\n--- Vercel ---")
+from fastapi import FastAPI  # noqa: E402
+
+from app import website  # noqa: E402
+
+check("not on Vercel by default", config.ON_VERCEL is False)
+log_lines.clear()
+log_startup_warnings()
+check("normal host: no Vercel warning", '"vercel_state_per_instance"' not in "".join(log_lines))
+
+config.ON_VERCEL, config.KEEP_ALIVE_URL = True, "http://127.0.0.1:1/health"
+log_lines.clear()
+log_startup_warnings()
+check("Vercel: one startup warning that state is per instance",
+      sum('"vercel_state_per_instance"' in l for l in log_lines) == 1, log_lines)
+log_lines.clear()
+with TestClient(app) as vercel_client:  # runs the lifespan (startup and shutdown)
+    vercel_health = vercel_client.get("/health")
+check("Vercel: no keep-alive started, even with KEEP_ALIVE_URL set",
+      vercel_health.status_code == 200 and '"keep_alive_started"' not in "".join(log_lines)
+      and not any(t.name == "keep_alive" or getattr(t, "_target", None) is keep_alive
+                  for t in threading.enumerate()), log_lines)
+
+saved_web_dir = website.WEB_DIR
+website.WEB_DIR = saved_web_dir.parent / "no-such-web-folder"
+log_lines.clear()
+bare_app = FastAPI()
+website.serve_static_files(bare_app)  # must not raise
+check("Vercel: a missing web/ folder doesn't crash startup, and is logged",
+      not any(getattr(route, "name", None) == "web" for route in bare_app.routes)
+      and '"web_folder_missing"' in "".join(log_lines), log_lines)
+config.ON_VERCEL = False
+try:
+    website.serve_static_files(FastAPI())
+    missing_web_on_normal_host = "no error"
+except RuntimeError:
+    missing_web_on_normal_host = "error"
+check("normal host: a missing web/ folder still fails as before", missing_web_on_normal_host == "error")
+website.WEB_DIR = saved_web_dir
+config.KEEP_ALIVE_URL = ""
+
+started = start_server(VERCEL="1", KEEP_ALIVE_URL="http://127.0.0.1:1/health")
+check("VERCEL=1: the app imports and logs the per-instance warning",
+      started.returncode == 0 and '"vercel_state_per_instance"' in started.stdout, started.stdout + started.stderr)
+check("vercel entry point is app.server:app",
+      'entrypoint = "app.server:app"' in open("pyproject.toml", encoding="utf-8").read())
 
 # The customer's name (individualsname) only ever goes into the WhatsApp
 # template (section 12a): never a tool result, "say", "message" or log line.

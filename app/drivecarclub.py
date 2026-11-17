@@ -21,6 +21,10 @@ from app.errors import DCCUnavailable
 # Get a new token this many seconds BEFORE the old one expires.
 REFRESH_EARLY_SECONDS = 60
 
+# The Token API is tried once more after this wait, if the first try timed
+# out, couldn't connect or got a 5xx (never after a 4xx such as bad credentials).
+TOKEN_RETRY_WAIT_SECONDS = 1
+
 # Places the token might be in the Token API's JSON response.
 TOKEN_KEYS = ["access_token", "token", "Token", "AccessToken"]
 
@@ -39,6 +43,7 @@ class DriveCarClubClient:
         token_ttl=None,
         token_header=None,
         token_prefix=None,
+        token_timeout=None,
     ):
         # Anything not passed in comes from the .env settings.
         # (The tests pass their own values to talk to a fake server.)
@@ -48,6 +53,7 @@ class DriveCarClubClient:
         self.username = username if username is not None else config.DCC_USERNAME
         self.password = password if password is not None else config.DCC_PASSWORD
         self.timeout = timeout or config.DCC_TIMEOUT_SECONDS
+        self.token_timeout = token_timeout or config.DCC_TOKEN_TIMEOUT_SECONDS  # the Token API only
         self.token_ttl = token_ttl or config.DCC_TOKEN_TTL_SECONDS
         self.token_header = token_header or config.DCC_TOKEN_HEADER
         self.token_prefix = token_prefix if token_prefix is not None else config.DCC_TOKEN_PREFIX
@@ -79,21 +85,37 @@ class DriveCarClubClient:
                 self._token = None
                 self._token_expires_at = 0.0
 
-    def _fetch_token(self):
-        """Call the Token API. Returns (token, lifetime_in_seconds)."""
+    def _post_token(self):
+        """One Token API call (DCC_TOKEN_TIMEOUT_SECONDS). Returns the response
+        if it is a 200; raises DCCUnavailable otherwise."""
         try:
             response = requests.post(
                 self.token_url,
                 auth=(self.username, self.password),
-                timeout=self.timeout,
+                timeout=self.token_timeout,
             )
         except requests.Timeout:
             raise DCCUnavailable("token_timeout")
         except requests.RequestException:
             raise DCCUnavailable("token_network_error")
-
         if response.status_code != 200:
             raise DCCUnavailable(f"token_http_{response.status_code}")
+        return response
+
+    def _fetch_token(self):
+        """Call the Token API, once more after TOKEN_RETRY_WAIT_SECONDS if the
+        first try timed out, couldn't connect or got a 5xx.
+        Returns (token, lifetime_in_seconds)."""
+        try:
+            response = self._post_token()
+        except DCCUnavailable as failure:
+            retryable = failure.reason in ("token_timeout", "token_network_error") or \
+                failure.reason.startswith("token_http_5")
+            if not retryable:
+                raise
+            log.warning("dcc_token_retry", reason=failure.reason)
+            time.sleep(TOKEN_RETRY_WAIT_SECONDS)
+            response = self._post_token()
 
         token, expires_in = self._read_token_response(response)
         if not token:

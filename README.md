@@ -97,6 +97,45 @@ both are live they share one client, so one token serves both APIs. Any value ot
 The mock data uses the same field names and formats as the real API, so mock and live go
 through exactly the same mapping.
 
+The Token API has its own timeout, `DCC_TOKEN_TIMEOUT_SECONDS` (default 10), because it can
+be slow on a cold start. If it times out, can't be reached or answers 5xx, it is tried once
+more after 1 second (a `dcc_token_retry` warning with the reason). A 4xx, such as wrong
+credentials, is not retried. The other calls keep `DCC_TIMEOUT_SECONDS` (default 5).
+
+### 3a. Deploy on Vercel (demo)
+
+The same code runs on Vercel with no extra entry file. Vercel's FastAPI preset uses the `app`
+in `app/server.py`, named in `pyproject.toml` under `[tool.vercel]`
+(`entrypoint = "app.server:app"`). That one function serves every path: `/mcp`, `/health`,
+`/api/...` and the test page. Vercel installs the packages from `requirements.txt` (made with
+`uv export --no-dev --no-hashes -o requirements.txt`; run it again after changing
+`pyproject.toml`). `.vercelignore` keeps `.env`, the tests and local files out of the upload.
+
+1. Import the repository in Vercel (or run `vercel` in the project folder). Framework: FastAPI.
+2. In **Settings → Environment Variables**, add everything you would put in `.env`
+   (`MCP_API_KEY`, `DCC_*`, `PERFOX_*`, `WA_*`...). `.env` is never uploaded.
+3. Make sure `VERCEL` is set at runtime: tick **Enable access to System Environment
+   Variables**, or add `VERCEL=1` yourself. Leave `KEEP_ALIVE_URL` empty (it is ignored there
+   anyway).
+4. Deploy, then check `https://<project>.vercel.app/health` and point Perfox at
+   `https://<project>.vercel.app/mcp`.
+
+When `VERCEL` is set:
+
+- **No background task:** the keep-alive is never started (Vercel needs none).
+- **`web/` is optional:** if the folder is missing, the API still starts without the test page
+  (a `web_folder_missing` warning).
+- **State is per instance.** Sessions, OTP codes, the summary limits, the fare cache and the
+  DriveCarClub token are all in memory, so each Vercel instance has its own. They are lost when
+  it stops, and a conversation that lands on another instance starts fresh (for example it
+  must verify again). A `vercel_state_per_instance` warning is logged at startup. Fine for a
+  demo; a shared store (such as Redis) would be needed for the pilot.
+- The startup safety locks still apply: a refused setting fails the deployment's function.
+- Vercel limits: requests and responses up to 4.5 MB, and up to 300 seconds per request on
+  the Hobby plan.
+
+On any other host nothing changes.
+
 ### DriveCarClub booking fields
 
 The UAT DespatchedBooking API answers `{"status": "200", "message": "Success", "data": [...]}`.
@@ -626,13 +665,15 @@ at startup.
 | `app/sms.py` | Sending the SMS (mock or Plivo) |
 | `app/identity.py` | Trusted-number rules, phone formatting, per-conversation sessions |
 | `app/mapper.py` | `FIELD_MAP` (real DriveCarClub field names), date parsing, filtering and the field allowlists |
-| `app/drivecarclub.py` | Live DriveCarClub client: token caching, one retry on 401, timeouts |
+| `app/drivecarclub.py` | Live DriveCarClub client: token caching, one retry on 401, timeouts, one Token API retry |
 | `app/fares.py` | `get_fare` input checks, GetRate field mapping, and the 1-hour fare cache |
 | `app/mock.py` | Fake data for the test numbers, the `MOCK_NUMBER_SCENARIOS` scenarios, and fake fares |
 | `app/config.py` | All settings (read from `.env`) |
 | `app/log.py`, `app/errors.py` | JSON logging, and the "DriveCarClub unavailable", "SMS unavailable" and "WhatsApp summary failed" errors |
 | `tests/run_tests.py` | All tests |
-| `pyproject.toml`, `uv.lock` | Package list and exact locked versions (used by uv) |
+| `pyproject.toml`, `uv.lock` | Package list and exact locked versions (used by uv); the Vercel entry point |
+| `requirements.txt` | The same packages for Vercel (exported from `uv.lock`) |
+| `.vercelignore` | Files Vercel never uploads (`.env`, tests, local files) |
 
 ## 8. Still waiting on DriveCarClub IT
 

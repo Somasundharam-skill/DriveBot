@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from app import browser_sessions, identity, log, mapper, otp, tools
+from app import browser_sessions, config, identity, log, mapper, otp, tools
 from app.errors import DCCUnavailable, SMSUnavailable
 
 COOKIE_NAME = "dcc_sid"
@@ -262,5 +262,12 @@ def my_pickups(request: Request):
 
 
 def serve_static_files(app):
-    """Serve web/ at "/" (index.html for "/"). Call this AFTER all other routes."""
+    """Serve web/ at "/" (index.html for "/"). Call this AFTER all other routes.
+
+    On Vercel the folder is optional: if it wasn't deployed, the API (/mcp,
+    /health, /api/...) still starts, just without the test page.
+    """
+    if config.ON_VERCEL and not WEB_DIR.is_dir():
+        log.warning("web_folder_missing", note="web/ was not found: the test page is not served.")
+        return
     app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")

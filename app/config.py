@@ -48,6 +48,12 @@ PORT = int(_number("PORT", 8000))
 KEEP_ALIVE_URL = _text("KEEP_ALIVE_URL")
 KEEP_ALIVE_SECONDS = _number("KEEP_ALIVE_SECONDS", 300)  # every 5 minutes
 
+# Running on Vercel? Vercel sets VERCEL=1 (with "Enable access to System
+# Environment Variables" on; otherwise add VERCEL=1 yourself). Then there
+# is no keep-alive or other background task, the web/ folder is optional,
+# and the in-memory state (sessions, OTPs, limits, token) is per instance.
+ON_VERCEL = bool(_text("VERCEL"))
+
 # Show FastAPI's automatic API pages (/docs)? Off by default, because the
 # server is public on Render.
 ENABLE_DOCS = _yes_no("ENABLE_DOCS")
@@ -76,6 +82,9 @@ DCC_TOKEN_HEADER = _text("DCC_TOKEN_HEADER", "Authorization")
 DCC_TOKEN_PREFIX = _text("DCC_TOKEN_PREFIX", "Bearer")
 DCC_TOKEN_TTL_SECONDS = _number("DCC_TOKEN_TTL_SECONDS", 3000)
 DCC_TIMEOUT_SECONDS = _number("DCC_TIMEOUT_SECONDS", 5)
+# The Token API only: it can be slow on a cold start, so it gets longer, and
+# one retry after 1 second if it times out, can't be reached or answers 5xx.
+DCC_TOKEN_TIMEOUT_SECONDS = _number("DCC_TOKEN_TIMEOUT_SECONDS", 10)
 
 # Which booking field is read out as the pickup area: "city_Name" or
 # "location". DriveCarClub hasn't confirmed which is right. The full

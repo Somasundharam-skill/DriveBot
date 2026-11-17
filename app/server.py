@@ -47,7 +47,9 @@ def keep_alive(stop):
 @asynccontextmanager
 async def lifespan(app):
     stop = threading.Event()
-    if config.KEEP_ALIVE_URL:
+    # No background tasks on Vercel: an instance is frozen between requests,
+    # and Vercel needs no keep-alive.
+    if config.KEEP_ALIVE_URL and not config.ON_VERCEL:
         # daemon=True: the thread never blocks the server from shutting down.
         threading.Thread(target=keep_alive, args=(stop,), daemon=True).start()
         log.info("keep_alive_started", url=config.KEEP_ALIVE_URL, every_seconds=config.KEEP_ALIVE_SECONDS)
@@ -270,6 +272,12 @@ def check_wa_params():
 
 
 def log_startup_warnings():
+    if config.ON_VERCEL:
+        log.warning("vercel_state_per_instance",
+                    note="Running on Vercel: sessions, OTP codes, summary limits and the DriveCarClub token are "
+                         "kept in memory PER INSTANCE and lost when an instance stops. A conversation that "
+                         "lands on another instance starts fresh (for example it must verify again). "
+                         "No keep-alive or background task runs.")
     if config.VERIFICATION_MODE == "none":
         log.warning("verification_off",
                     note="Verification is OFF: anyone can check any number's bookings. UAT demo only.")

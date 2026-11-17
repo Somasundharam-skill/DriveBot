@@ -1,0 +1,15 @@
+# Not uploaded to Vercel. Settings go in Vercel's Environment Variables, never in .env.
+.env
+.env.*
+!.env.example
+
+# Tests and local-only files
+tests/
+.venv/
+venv/
+__pycache__/
+*.pyc
+requirements-local.txt
+Car_Club_Call_SOPs/
+.claude/
+.vscode/
